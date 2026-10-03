@@ -205,5 +205,13 @@ INTERVIEW_HELP/
 
 ---
 
+## 👤 Author
+
+**Mohan Sharma**
+- GitHub: [@mohansharma916](https://github.com/mohansharma916)
+
+---
+
 ## 📄 License
-ISC
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

@@ -1,6 +1,8 @@
 {
   "name": "sidebro-server",
   "version": "1.0.0",
+  "author": "Mohan Sharma",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "build": "tsc",

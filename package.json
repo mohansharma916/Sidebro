@@ -27,8 +27,8 @@
     "transcription",
     "websocket"
   ],
-  "author": "",
-  "license": "ISC",
+  "author": "Mohan Sharma",
+  "license": "MIT",
   "devDependencies": {
     "concurrently": "^9.1.2",
     "electron": "^34.2.0",
