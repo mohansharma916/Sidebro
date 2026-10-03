@@ -1,0 +1,13 @@
+node_modules
+server/node_modules
+client/node_modules
+dist
+server/dist
+client/dist
+.git
+.vscode
+.gemini
+*.log
+.DS_Store
+.env.local
+server/data/*.sqlite-journal

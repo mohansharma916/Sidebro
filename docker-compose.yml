@@ -1,0 +1,32 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    container_name: sidebro-backend
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      - PORT=3001
+      - NODE_ENV=production
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OLLAMA_HOST=${OLLAMA_HOST:-}
+    volumes:
+      - sidebro-data:/app/server/data
+
+  client:
+    build:
+      context: .
+      dockerfile: client/Dockerfile
+    container_name: sidebro-client
+    restart: unless-stopped
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend
+
+volumes:
+  sidebro-data:
+    driver: local
