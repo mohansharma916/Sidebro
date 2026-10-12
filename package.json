@@ -1,7 +1,7 @@
 {
   "name": "sidebro-ai",
   "version": "1.0.0",
-  "description": "SideBro AI — Real-Time Second-Screen Interview Wingman & Technical Conversation Copilot",
+  "description": "SideBro AI \u2014 Real-Time Second-Screen Interview Wingman & Technical Conversation Copilot",
   "workspaces": [
     "server",
     "client"
@@ -13,6 +13,8 @@
     "build": "npm run build --workspace=server && npm run build --workspace=client",
     "start": "npm run start --workspace=server",
     "start:server": "npm run start --workspace=server",
+    "test": "npm run test --workspace=server",
+    "e2e": "npm run e2e --workspace=server",
     "docker:build": "docker compose build",
     "docker:up": "docker compose up -d",
     "docker:down": "docker compose down",

@@ -50,23 +50,14 @@ interface DesktopAgentViewProps {
   onStopMicrophone: () => void;
   onStartSystemAudio: () => void;
   onStopSystemAudio: () => void;
-  onCreateSession: (type: SessionType, title: string, profile: ContextProfile, experienceLevel: ExperienceLevel) => void;
+  onCreateSession: (type: SessionType, title: string, profile: ContextProfile | undefined, experienceLevel: ExperienceLevel) => void;
   onPauseSession: () => void;
   onResumeSession: () => void;
   onEndSession: () => void;
   onSimulateSpeech: (speaker: 'OTHER' | 'YOU', text: string) => void;
 }
 
-const DEFAULT_FALLBACK_PROFILE: ContextProfile = {
-  id: 'default-profile',
-  name: 'Senior React Native & Fullstack Lead',
-  role: 'Senior Staff Software Engineer',
-  experience: '6 Years',
-  resumeText: 'Senior Software Engineer with 6+ years of experience architecting high-scale mobile and web applications with React Native, TypeScript, React, Node.js, and Distributed Cloud Systems.',
-  jobDescriptionText: 'Role: Senior Staff Mobile/Fullstack Architect. Requirements: Deep expertise in React Native new architecture (Fabric, TurboModules, JSI, Hermes), distributed real-time systems, and high performance.',
-  projectNotesText: 'Accomplishments: Video OTT Playback Engine with JSI; Black Friday Redis cache stampede incident resolution with probabilistic early expiration in 18 minutes.',
-  preferredLanguage: 'TypeScript',
-};
+const DEMO_PROFILE_ID = 'demo-profile';
 
 export const DesktopAgentView: React.FC<DesktopAgentViewProps> = ({
   session,
@@ -95,7 +86,8 @@ export const DesktopAgentView: React.FC<DesktopAgentViewProps> = ({
   const [sessionTitle, setSessionTitle] = useState('Senior React Native Interview');
   const [experienceLevel, setExperienceLevel] = useState<ExperienceLevel>('senior');
   const [profiles, setProfiles] = useState<ContextProfile[]>([]);
-  const [selectedProfileId, setSelectedProfileId] = useState<string>('default-profile');
+  // '' = no profile: answers are generic and never claim experience you didn't provide
+  const [selectedProfileId, setSelectedProfileId] = useState<string>('');
   const [showQrModal, setShowQrModal] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
   const [customSpeechText, setCustomSpeechText] = useState('');
@@ -107,17 +99,21 @@ export const DesktopAgentView: React.FC<DesktopAgentViewProps> = ({
       .then(data => {
         if (Array.isArray(data) && data.length > 0) {
           setProfiles(data);
-          setSelectedProfileId(data[0].id);
+          // Auto-select the user's own profile, never the demo one
+          const own = data.find((p: ContextProfile) => p.id !== DEMO_PROFILE_ID);
+          if (own) setSelectedProfileId(own.id);
         }
       })
       .catch(() => {});
   }, []);
 
+  const selectedProfile = profiles.find(p => p.id === selectedProfileId);
+
   const handleStartSession = async () => {
     if (isStarting) return;
     setIsStarting(true);
     try {
-      const profile = profiles.find(p => p.id === selectedProfileId) || profiles[0] || DEFAULT_FALLBACK_PROFILE;
+      const profile = profiles.find(p => p.id === selectedProfileId);
       await onCreateSession(sessionType, sessionTitle, profile, experienceLevel);
       // Try to start microphone gracefully without blocking UI
       try {
@@ -261,9 +257,11 @@ export const DesktopAgentView: React.FC<DesktopAgentViewProps> = ({
               <label style={{ fontSize: '0.84rem', fontWeight: 600, color: '#e2e8f0' }}>
                 Context Profile & Documents (PRD Section 23)
               </label>
-              <span style={{ fontSize: '0.74rem', color: '#10b981', display: 'flex', alignItems: 'center', gap: '4px' }}>
-                <CheckCircle2 size={12} /> Resume & JD Loaded
-              </span>
+              {selectedProfile && (
+                <span style={{ fontSize: '0.74rem', color: '#10b981', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                  <CheckCircle2 size={12} /> Profile Loaded
+                </span>
+              )}
             </div>
             <select
               value={selectedProfileId}
@@ -279,17 +277,28 @@ export const DesktopAgentView: React.FC<DesktopAgentViewProps> = ({
                 outline: 'none',
               }}
             >
+              <option value="" style={{ background: '#0d121d' }}>
+                No profile (generic answers)
+              </option>
               {profiles.map(p => (
                 <option key={p.id} value={p.id} style={{ background: '#0d121d' }}>
-                  {p.name} ({p.experience})
+                  {p.name}{p.experience ? ` (${p.experience})` : ''}
                 </option>
               ))}
             </select>
-            <div style={{ display: 'flex', gap: '8px', marginTop: '8px', fontSize: '0.74rem', color: '#64748b' }}>
-              <span>✓ Resume</span>
-              <span>✓ Job Description</span>
-              <span>✓ Video OTT Playback Notes</span>
-              <span>✓ Incident Response Notes</span>
+            <div style={{ display: 'flex', gap: '8px', marginTop: '8px', fontSize: '0.74rem', color: '#64748b', flexWrap: 'wrap' }}>
+              {selectedProfile ? (
+                <>
+                  <span>{selectedProfile.resumeText ? '✓' : '✗'} Resume</span>
+                  <span>{selectedProfile.jobDescriptionText ? '✓' : '✗'} Job Description</span>
+                  <span>{selectedProfile.projectNotesText ? '✓' : '✗'} Project Notes</span>
+                  {selectedProfile.id === DEMO_PROFILE_ID && (
+                    <span style={{ color: '#f59e0b' }}>⚠ Sample data, not yours</span>
+                  )}
+                </>
+              ) : (
+                <span>Add your resume in Context Profile so answers can reference your real experience.</span>
+              )}
             </div>
           </div>
 

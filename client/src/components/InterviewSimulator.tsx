@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Play, Square, FastForward, CheckCircle2 } from 'lucide-react';
+import { postJson } from '../api';
 
 interface InterviewSimulatorProps {
   sessionId: string;
@@ -16,24 +17,18 @@ export const InterviewSimulator: React.FC<InterviewSimulatorProps> = ({
   const startSimulation = async () => {
     setIsRunning(true);
     try {
-      await fetch('/api/simulation/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId, scenarioId: activeScenario }),
-      });
+      const res = await postJson(`/api/sessions/${sessionId}/mock-interview/start`, { scenarioId: activeScenario });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
     } catch (e) {
       console.error('[Simulator] Start failed:', e);
+      setIsRunning(false);
     }
   };
 
   const stopSimulation = async () => {
     setIsRunning(false);
     try {
-      await fetch('/api/simulation/stop', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId }),
-      });
+      await postJson(`/api/sessions/${sessionId}/mock-interview/stop`);
     } catch (e) {
       console.error('[Simulator] Stop failed:', e);
     }

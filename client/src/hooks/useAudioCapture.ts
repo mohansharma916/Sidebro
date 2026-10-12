@@ -40,8 +40,16 @@ function blobToBase64(blob: Blob): Promise<string> {
   });
 }
 
+// Voice-activity segmentation: a segment ends after a pause in speech instead of at a fixed
+// interval, so words and sentences are not cut in half between Whisper requests.
+const SPEECH_THRESHOLD = 0.024;      // speech typically exceeds 0.024; ambient noise stays below ~0.018
+const SILENCE_END_MS = 700;          // pause length that ends an utterance
+const MIN_SEGMENT_MS = 1000;
+const MAX_SEGMENT_MS = 10000;        // hard cap for long monologues
+const IDLE_SEGMENT_MS = 3000;        // recycle silent segments so they never grow large
+
 /**
- * Continuous Segment Recorder that records audio in sequential 2.5-second chunks.
+ * Continuous Segment Recorder that records one standalone file per utterance.
  * Calling rec.stop() guarantees every single slice has a complete, valid container
  * header (EBML/Opus/WAV), preventing headerless chunk errors in Whisper.
  */
@@ -54,7 +62,6 @@ class ContinuousSegmentRecorder {
   private currentRecorder: MediaRecorder | null = null;
   private timer: any = null;
   private monitorTimer: any = null;
-  private intervalMs: number = 2500; // 2.5 second slice for responsive transcription and continuous sentences
   private getVolume: () => number;
   private maxVolInSlice: number = 0;
   private speechFramesInSlice: number = 0;
@@ -86,17 +93,38 @@ class ContinuousSegmentRecorder {
 
       this.maxVolInSlice = 0;
       this.speechFramesInSlice = 0;
+      const segmentStart = Date.now();
+      let lastSpeechAt = 0;
 
-      // Monitor audio energy periodically across the 3.5s segment
+      const stopSegment = () => {
+        if (rec.state === 'recording') {
+          try {
+            rec.stop();
+          } catch {}
+        }
+      };
+
+      // Monitor audio energy and end the segment at a natural pause
       if (this.monitorTimer) clearInterval(this.monitorTimer);
       this.monitorTimer = setInterval(() => {
+        const now = Date.now();
         const vol = this.getVolume();
         if (vol > this.maxVolInSlice) {
           this.maxVolInSlice = vol;
         }
-        // Human speech typically exceeds 0.024 amplitude; ambient air/breathing stays below 0.018
-        if (vol > 0.024) {
+        if (vol > SPEECH_THRESHOLD) {
           this.speechFramesInSlice++;
+          lastSpeechAt = now;
+        }
+
+        const elapsed = now - segmentStart;
+        const heardSpeech = this.speechFramesInSlice >= 3;
+        if (
+          elapsed >= MAX_SEGMENT_MS ||
+          (heardSpeech && elapsed >= MIN_SEGMENT_MS && now - lastSpeechAt >= SILENCE_END_MS) ||
+          (!heardSpeech && elapsed >= IDLE_SEGMENT_MS)
+        ) {
+          stopSegment();
         }
       }, 60);
 
@@ -142,16 +170,6 @@ class ContinuousSegmentRecorder {
       };
 
       rec.start();
-
-      // Stop recorder after interval to flush a complete standalone file
-      if (this.timer) clearTimeout(this.timer);
-      this.timer = setTimeout(() => {
-        if (rec.state === 'recording') {
-          try {
-            rec.stop();
-          } catch {}
-        }
-      }, this.intervalMs);
     } catch (err) {
       if (this.monitorTimer) {
         clearInterval(this.monitorTimer);

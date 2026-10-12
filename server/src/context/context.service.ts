@@ -1,11 +1,11 @@
 import { Injectable } from '@nestjs/common';
 import { ContextEngine, DocumentChunk } from '../contextEngine.js';
-import { ContextProfile } from '../types.js';
+import { StorageService } from '../storage/storage.service.js';
 
 @Injectable()
 export class ContextService extends ContextEngine {
-  constructor() {
-    super();
+  constructor(storageService: StorageService) {
+    super(storageService);
   }
 }
 

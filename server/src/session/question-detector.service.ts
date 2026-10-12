@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { QuestionDetector } from '../questionDetector.js';
-import { DetectedQuestion } from '../types.js';
+import { DetectedQuestion, TranscriptItem } from '../types.js';
 
 @Injectable()
 export class QuestionDetectorService {
@@ -19,7 +19,7 @@ export class QuestionDetectorService {
     this.handler = handler;
   }
 
-  public ingestTranscript(transcript: any): void {
+  public ingestTranscript(transcript: TranscriptItem): void {
     this.detector.ingestTranscript(transcript);
   }
 

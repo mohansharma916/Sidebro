@@ -10,7 +10,8 @@ COPY server/package*.json ./server/
 # Install build dependencies
 RUN npm install
 
-# Copy client source code
+# Copy client source code and the shared type definitions it imports
+COPY shared ./shared
 COPY client ./client
 
 # Build Vite static assets

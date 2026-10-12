@@ -1,27 +1,32 @@
-import { Controller, Get, Param, Query, Res, NotFoundException } from '@nestjs/common';
+import { Controller, Get, Param, Query, Res, NotFoundException, UseGuards } from '@nestjs/common';
 import type { Response } from 'express';
 import { StorageService } from '../storage/storage.service.js';
+import { AdminTokenGuard, SessionTokenGuard } from '../common/guards.js';
 
 @Controller('api/analytics')
 export class AnalyticsController {
   constructor(private readonly storageService: StorageService) {}
 
   @Get('overview')
+  @UseGuards(AdminTokenGuard)
   getOverview() {
     return this.storageService.getGlobalAnalytics();
   }
 
   @Get('coding-solutions')
+  @UseGuards(AdminTokenGuard)
   getCodingSolutions() {
     return this.storageService.getAllCodingSolutions();
   }
 
   @Get('search')
+  @UseGuards(AdminTokenGuard)
   search(@Query('q') q: string) {
-    return this.storageService.searchArchive(q || '');
+    return this.storageService.searchArchive(typeof q === 'string' ? q.slice(0, 200) : '');
   }
 
   @Get('debug/:id')
+  @UseGuards(SessionTokenGuard)
   getDebugDump(@Param('id') id: string) {
     const dump = this.storageService.getSessionDebugDump(id);
     if (!dump.session) {
@@ -30,7 +35,9 @@ export class AnalyticsController {
     return dump;
   }
 
+  /** Download link: pass the session token as `?token=` since browsers can't add headers to links. */
   @Get('export/:id/markdown')
+  @UseGuards(SessionTokenGuard)
   exportMarkdown(@Param('id') id: string, @Res() res: Response) {
     const dump = this.storageService.getSessionDebugDump(id);
     if (!dump.session) {
@@ -64,7 +71,7 @@ export class AnalyticsController {
           md += `\n`;
         }
         if (ans.exampleOrSnippet) {
-          md += `#### Code / Implementation Blueprint\n\`\`\`typescript\n${ans.exampleOrSnippet}\n\`\`\`\n\n`;
+          md += `#### Code / Implementation Blueprint\n\`\`\`\n${ans.exampleOrSnippet}\n\`\`\`\n\n`;
         }
         if (ans.followUpQuestions && ans.followUpQuestions.length > 0) {
           md += `#### Anticipated Follow-up Questions\n`;
@@ -93,7 +100,7 @@ export class AnalyticsController {
     }
 
     res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
-    res.setHeader('Content-Disposition', `attachment; filename="interview-${dump.session.id}.md"`);
+    res.setHeader('Content-Disposition', `attachment; filename="interview-${dump.session.id.replace(/[^\w.-]/g, '_')}.md"`);
     res.send(md);
   }
 }

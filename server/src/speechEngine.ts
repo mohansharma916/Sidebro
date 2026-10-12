@@ -1,9 +1,4 @@
-import dotenv from 'dotenv';
-import path from 'path';
-dotenv.config();
-dotenv.config({ path: path.resolve(process.cwd(), '.env') });
-dotenv.config({ path: path.resolve(process.cwd(), 'server/.env') });
-dotenv.config({ path: path.resolve(process.cwd(), '../server/.env') });
+const WHISPER_TIMEOUT_MS = 20_000;
 
 export interface TranscriptionResult {
   text: string;
@@ -19,11 +14,6 @@ export class SpeechEngine {
   constructor() {
     this.groqApiKey = process.env.GROQ_API_KEY;
     this.openaiApiKey = process.env.OPENAI_API_KEY;
-  }
-
-  public setApiKey(provider: 'groq' | 'openai', key: string): void {
-    if (provider === 'groq') this.groqApiKey = key;
-    if (provider === 'openai') this.openaiApiKey = key;
   }
 
   public getStatus(): {
@@ -99,7 +89,7 @@ export class SpeechEngine {
             engine: 'groq',
           };
         } catch (v3Err: any) {
-          console.warn('[SpeechEngine] Groq Whisper (turbo & v3) notice:', err.message);
+          console.warn('[SpeechEngine] Groq Whisper (turbo & v3) failed:', v3Err?.message || err?.message);
         }
       }
     }
@@ -228,6 +218,7 @@ export class SpeechEngine {
         Authorization: `Bearer ${apiKey}`,
       },
       body: formData,
+      signal: AbortSignal.timeout(WHISPER_TIMEOUT_MS),
     });
 
     if (!res.ok) {

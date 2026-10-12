@@ -1,10 +1,12 @@
+import crypto from 'crypto';
 import {
+  AnswerLengthMode,
   ContextProfile,
   DetectedQuestion,
   DeviceInfo,
+  ExperienceLevel,
   GeneratedAnswer,
   PostSessionSummary,
-  QuestionCategory,
   SessionNote,
   SessionState,
   SessionType,
@@ -12,10 +14,16 @@ import {
 } from './types.js';
 import { StorageEngine } from './storageEngine.js';
 
+/** Pairing codes stop resolving after this long (the session itself is kept). */
+const CODE_TTL_MS = 12 * 60 * 60 * 1000;
+/** How often the running duration is flushed to SQLite. */
+const DURATION_PERSIST_EVERY_S = 15;
+
 export class SessionManager {
-  private storage: StorageEngine;
+  protected readonly storage: StorageEngine;
   private sessions: Map<string, SessionState> = new Map();
   private codeToSessionId: Map<string, string> = new Map();
+  // Per-session child collections are loaded lazily from SQLite on first access
   private transcripts: Map<string, TranscriptItem[]> = new Map();
   private questions: Map<string, DetectedQuestion[]> = new Map();
   private answers: Map<string, GeneratedAnswer[]> = new Map();
@@ -23,8 +31,8 @@ export class SessionManager {
   private currentQuestion: Map<string, DetectedQuestion> = new Map();
   private durationIntervals: Map<string, NodeJS.Timeout> = new Map();
 
-  constructor(customDbPath?: string) {
-    this.storage = new StorageEngine(customDbPath);
+  constructor(storage: StorageEngine) {
+    this.storage = storage;
     this.loadFromStorage();
   }
 
@@ -33,25 +41,33 @@ export class SessionManager {
   }
 
   /**
-   * Pre-loads historical sessions and data from SQLite database on startup
+   * Loads session metadata from SQLite on startup. Transcripts, questions, answers and
+   * notes are loaded on demand. Sessions that were active when the server stopped are
+   * marked paused so their clock can be resumed explicitly.
    */
   private loadFromStorage(): void {
-    try {
-      const persistedSessions = this.storage.getAllSessions();
-      for (const s of persistedSessions) {
-        this.sessions.set(s.id, s);
-        this.codeToSessionId.set(s.code, s.id);
-        this.transcripts.set(s.id, this.storage.getTranscripts(s.id));
-        this.questions.set(s.id, this.storage.getQuestions(s.id));
-        this.answers.set(s.id, this.storage.getAnswers(s.id));
-        this.notes.set(s.id, this.storage.getNotes(s.id));
+    const persistedSessions = this.storage.getAllSessions();
+    for (const s of persistedSessions) {
+      let dirty = false;
+      if (!s.token) {
+        s.token = SessionManager.generateToken();
+        dirty = true;
       }
-      if (persistedSessions.length > 0) {
-        console.log(`[SessionManager] Loaded ${persistedSessions.length} historical sessions from SQLite.`);
+      if (s.status === 'active') {
+        s.status = 'paused';
+        dirty = true;
       }
-    } catch (err) {
-      console.warn('[SessionManager] Notice loading from SQLite storage:', err);
+      if (dirty) this.storage.saveSession(s);
+      this.sessions.set(s.id, s);
+      this.codeToSessionId.set(s.code, s.id);
     }
+    if (persistedSessions.length > 0) {
+      console.log(`[SessionManager] Loaded ${persistedSessions.length} historical sessions from SQLite.`);
+    }
+  }
+
+  private static generateToken(): string {
+    return crypto.randomBytes(24).toString('base64url');
   }
 
   /**
@@ -61,18 +77,40 @@ export class SessionManager {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // Exclude ambiguous chars like 0, O, 1, I
     let code = '';
     for (let i = 0; i < 6; i++) {
-      code += chars.charAt(Math.floor(Math.random() * chars.length));
+      code += chars.charAt(crypto.randomInt(chars.length));
     }
     return code;
+  }
+
+  private startDurationTimer(session: SessionState): void {
+    if (this.durationIntervals.has(session.id)) return;
+    const interval = setInterval(() => {
+      if (session.status === 'active') {
+        session.durationSeconds++;
+        if (session.durationSeconds % DURATION_PERSIST_EVERY_S === 0) {
+          this.storage.updateSessionDuration(session.id, session.durationSeconds);
+        }
+      }
+    }, 1000);
+    interval.unref();
+    this.durationIntervals.set(session.id, interval);
+  }
+
+  private stopDurationTimer(id: string): void {
+    const interval = this.durationIntervals.get(id);
+    if (interval) {
+      clearInterval(interval);
+      this.durationIntervals.delete(id);
+    }
   }
 
   public createSession(
     type: SessionType = 'technical',
     title?: string,
     profile?: ContextProfile,
-    experienceLevel: 'junior' | 'mid' | 'senior' | 'staff' = 'senior'
+    experienceLevel: ExperienceLevel = 'senior'
   ): SessionState {
-    const id = `sess-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    const id = `sess-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
     let code = this.generateSessionCode();
     while (this.codeToSessionId.has(code)) {
       code = this.generateSessionCode();
@@ -81,6 +119,7 @@ export class SessionManager {
     const session: SessionState = {
       id,
       code,
+      token: SessionManager.generateToken(),
       title: title || `${type.charAt(0).toUpperCase() + type.slice(1)} Session`,
       type,
       status: 'active',
@@ -107,8 +146,6 @@ export class SessionManager {
 
     this.sessions.set(id, session);
     this.codeToSessionId.set(code, id);
-    this.sessions.set(id, session);
-    this.codeToSessionId.set(code, id);
     this.transcripts.set(id, []);
     this.questions.set(id, []);
     this.answers.set(id, []);
@@ -116,16 +153,7 @@ export class SessionManager {
 
     // Persist session to SQLite
     this.storage.saveSession(session);
-
-    // Start duration counter immediately
-    if (!this.durationIntervals.has(id)) {
-      const interval = setInterval(() => {
-        if (session.status === 'active') {
-          session.durationSeconds++;
-        }
-      }, 1000);
-      this.durationIntervals.set(id, interval);
-    }
+    this.startDurationTimer(session);
 
     return session;
   }
@@ -134,35 +162,31 @@ export class SessionManager {
     return this.sessions.get(id);
   }
 
+  /**
+   * Resolves a pairing code. Codes of ended sessions, and codes older than the TTL, no longer resolve.
+   */
   public getSessionByCode(code: string): SessionState | undefined {
     const id = this.codeToSessionId.get(code.toUpperCase().trim());
     if (!id) return undefined;
-    return this.sessions.get(id);
+    const session = this.sessions.get(id);
+    if (!session || session.status === 'ended') return undefined;
+    if (Date.now() - session.createdAt > CODE_TTL_MS) return undefined;
+    return session;
   }
 
-  public startSession(id: string): SessionState | undefined {
+  /** Constant-time token comparison. */
+  public verifyToken(id: string, token: string | undefined): boolean {
     const session = this.sessions.get(id);
-    if (!session) return undefined;
-
-    session.status = 'active';
-    session.startedAt = session.startedAt || Date.now();
-    this.storage.updateSessionStatus(id, 'active', session.durationSeconds);
-
-    if (!this.durationIntervals.has(id)) {
-      const interval = setInterval(() => {
-        if (session.status === 'active') {
-          session.durationSeconds++;
-        }
-      }, 1000);
-      this.durationIntervals.set(id, interval);
-    }
-
-    return session;
+    if (!session?.token || !token) return false;
+    const a = Buffer.from(session.token);
+    const b = Buffer.from(token);
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
   }
 
   public pauseSession(id: string): SessionState | undefined {
     const session = this.sessions.get(id);
     if (!session) return undefined;
+    if (session.status === 'ended') return session;
     session.status = 'paused';
     this.storage.updateSessionStatus(id, 'paused', session.durationSeconds);
     return session;
@@ -171,26 +195,35 @@ export class SessionManager {
   public resumeSession(id: string): SessionState | undefined {
     const session = this.sessions.get(id);
     if (!session) return undefined;
+    if (session.status === 'ended') return session;
     session.status = 'active';
+    session.startedAt = session.startedAt || Date.now();
     this.storage.updateSessionStatus(id, 'active', session.durationSeconds);
+    this.startDurationTimer(session);
     return session;
   }
 
   public endSession(id: string): SessionState | undefined {
     const session = this.sessions.get(id);
     if (!session) return undefined;
+    if (session.status === 'ended') return session;
 
     session.status = 'ended';
     session.endedAt = Date.now();
     this.storage.updateSessionStatus(id, 'ended', session.durationSeconds, session.endedAt);
-
-    const interval = this.durationIntervals.get(id);
-    if (interval) {
-      clearInterval(interval);
-      this.durationIntervals.delete(id);
-    }
+    this.stopDurationTimer(id);
 
     return session;
+  }
+
+  /** Called on shutdown: stop timers and pause running sessions, leaving ended ones untouched. */
+  public shutdown(): void {
+    for (const [id, session] of this.sessions) {
+      this.stopDurationTimer(id);
+      if (session.status === 'active') {
+        this.pauseSession(id);
+      }
+    }
   }
 
   public addDevice(id: string, device: DeviceInfo): void {
@@ -233,7 +266,6 @@ export class SessionManager {
     } else {
       session.devices = session.devices.filter(d => d.id !== deviceId);
     }
-    session.primaryConnected = session.devices.some(d => d.role === 'PRIMARY_CAPTURE');
 
     // Persist to SQLite
     this.storage.saveSession(session);
@@ -242,42 +274,56 @@ export class SessionManager {
   public setAudioStatus(id: string, micActive: boolean, systemAudioActive: boolean): void {
     const session = this.sessions.get(id);
     if (!session) return;
-    session.micActive = micActive;
-    session.systemAudioActive = systemAudioActive;
+    session.micActive = !!micActive;
+    session.systemAudioActive = !!systemAudioActive;
   }
 
-  public addTranscript(transcript: TranscriptItem): void {
-    const list = this.transcripts.get(transcript.sessionId);
-    if (list) {
-      list.push(transcript);
+  private lazyList<T>(map: Map<string, T[]>, sessionId: string, load: (id: string) => T[]): T[] {
+    let list = map.get(sessionId);
+    if (!list) {
+      if (!this.sessions.has(sessionId)) return [];
+      list = load(sessionId);
+      map.set(sessionId, list);
     }
+    return list;
+  }
+
+  /**
+   * Stores a transcript. Returns false if a transcript with the same id already exists
+   * (e.g. the same utterance retried over REST after a WebSocket send).
+   */
+  public addTranscript(transcript: TranscriptItem): boolean {
+    const list = this.lazyList(this.transcripts, transcript.sessionId, id => this.storage.getTranscripts(id));
+    if (list.some(t => t.id === transcript.id)) return false;
+    list.push(transcript);
     this.storage.saveTranscript(transcript);
+    return true;
   }
 
   public getTranscripts(sessionId: string): TranscriptItem[] {
-    return this.transcripts.get(sessionId) || [];
+    return this.lazyList(this.transcripts, sessionId, id => this.storage.getTranscripts(id));
   }
 
   public addQuestion(question: DetectedQuestion): void {
-    const list = this.questions.get(question.sessionId);
-    if (list) {
-      list.push(question);
-    }
+    this.getQuestions(question.sessionId).push(question);
     this.currentQuestion.set(question.sessionId, question);
     this.storage.saveQuestion(question);
   }
 
   public getCurrentQuestion(sessionId: string): DetectedQuestion | undefined {
-    return this.currentQuestion.get(sessionId);
+    const current = this.currentQuestion.get(sessionId);
+    if (current) return current;
+    const list = this.getQuestions(sessionId);
+    return list[list.length - 1];
   }
 
   public getQuestions(sessionId: string): DetectedQuestion[] {
-    return this.questions.get(sessionId) || [];
+    return this.lazyList(this.questions, sessionId, id => this.storage.getQuestions(id));
   }
 
   public addOrUpdateAnswer(answer: GeneratedAnswer): void {
-    const list = this.answers.get(answer.sessionId);
-    if (!list) return;
+    if (!this.sessions.has(answer.sessionId)) return;
+    const list = this.getAnswers(answer.sessionId);
 
     const idx = list.findIndex(a => a.id === answer.id);
     if (idx >= 0) {
@@ -289,30 +335,28 @@ export class SessionManager {
   }
 
   public getAnswers(sessionId: string): GeneratedAnswer[] {
-    return this.answers.get(sessionId) || [];
+    return this.lazyList(this.answers, sessionId, id => this.storage.getAnswers(id));
   }
 
   public addNote(note: SessionNote): void {
-    const list = this.notes.get(note.sessionId);
-    if (list) {
-      list.push(note);
-    }
+    this.getNotes(note.sessionId).push(note);
     this.storage.saveNote(note);
   }
 
   public getNotes(sessionId: string): SessionNote[] {
-    return this.notes.get(sessionId) || [];
+    return this.lazyList(this.notes, sessionId, id => this.storage.getNotes(id));
   }
 
-  public updateAnswerLength(sessionId: string, length: 'quick' | 'normal' | 'detailed'): void {
+  public updateAnswerLength(sessionId: string, length: AnswerLengthMode): void {
     const session = this.sessions.get(sessionId);
     if (session) {
       session.answerLength = length;
+      this.storage.saveSession(session);
     }
   }
 
   /**
-   * Generates post-session summary and analytics (PRD Section 50-51)
+   * Generates post-session summary and analytics from the recorded questions and answers.
    */
   public generateSummary(sessionId: string): PostSessionSummary | undefined {
     const session = this.sessions.get(sessionId);
@@ -322,31 +366,25 @@ export class SessionManager {
     const answers = this.getAnswers(sessionId);
     const notes = this.getNotes(sessionId);
 
-    // Identify topics based on questions
+    const latestAnswerFor = (questionId: string) =>
+      [...answers].reverse().find(a => a.questionId === questionId);
+
     const topics = new Set<string>();
     const topicsToReview = new Set<string>();
 
     questions.forEach(q => {
-      const qText = q.questionText.toLowerCase();
-      if (qText.includes('react') || qText.includes('fiber')) topics.add('React Internals');
-      if (qText.includes('bridge') || qText.includes('jsi')) topics.add('React Native Architecture');
-      if (qText.includes('flatlist') || qText.includes('performance')) topics.add('Mobile Performance Optimization');
-      if (qText.includes('rate limit') || qText.includes('system design')) topics.add('Distributed System Design');
-      if (qText.includes('incident') || qText.includes('challenge')) topics.add('Incident Response (STAR)');
-
-      if (q.type === 'System Design' || q.type === 'Coding') {
-        topicsToReview.add(q.type);
+      const category = q.type === 'manual' ? 'Manual Questions' : q.type;
+      topics.add(category);
+      const ans = latestAnswerFor(q.id);
+      if (q.type === 'System Design' || q.type === 'Coding' || !ans || !ans.isComplete) {
+        topicsToReview.add(category);
       }
     });
 
-    if (topics.size === 0) {
-      topics.add('Technical Core');
-      topics.add('Software Architecture');
-    }
-
-    const avgLatency = answers.length > 0
-      ? Math.round(answers.reduce((acc, a) => acc + (a.firstTokenLatencyMs || 500), 0) / answers.length)
-      : 420;
+    const measured = answers.filter(a => typeof a.firstTokenLatencyMs === 'number');
+    const avgLatency = measured.length > 0
+      ? Math.round(measured.reduce((acc, a) => acc + (a.firstTokenLatencyMs as number), 0) / measured.length)
+      : 0;
 
     const summary: PostSessionSummary = {
       sessionId,
@@ -355,11 +393,11 @@ export class SessionManager {
       topicsDiscussed: Array.from(topics),
       topicsToReview: Array.from(topicsToReview),
       questions: questions.map(q => {
-        const ans = answers.find(a => a.questionId === q.id);
+        const ans = latestAnswerFor(q.id);
         return {
           question: q.questionText,
           type: q.type,
-          answerExcerpt: ans ? ans.directAnswer : 'Answer pending',
+          answerExcerpt: ans ? ans.directAnswer || ans.fullContent.slice(0, 200) : 'Answer pending',
         };
       }),
       notesCount: notes.length,
@@ -380,11 +418,7 @@ export class SessionManager {
     const session = this.sessions.get(id);
     if (!session) return false;
 
-    if (this.durationIntervals.has(id)) {
-      clearInterval(this.durationIntervals.get(id)!);
-      this.durationIntervals.delete(id);
-    }
-
+    this.stopDurationTimer(id);
     this.codeToSessionId.delete(session.code);
     this.sessions.delete(id);
     this.transcripts.delete(id);

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { apiFetch } from '../api';
 import {
   BarChart3,
   Clock,
@@ -27,8 +28,11 @@ export const PostSessionView: React.FC<PostSessionViewProps> = ({
   const [loading, setLoading] = useState(true);
 
   const fetchSummary = () => {
-    fetch(`/api/sessions/${sessionId}/summary`)
-      .then(res => res.json())
+    apiFetch(`/api/sessions/${sessionId}/summary`)
+      .then(res => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
       .then(data => {
         setSummary(data);
         setLoading(false);
@@ -265,7 +269,7 @@ export const PostSessionView: React.FC<PostSessionViewProps> = ({
           <button
             onClick={async () => {
               if (window.confirm('Are you sure you want to permanently delete this session transcript and memory?')) {
-                await fetch(`/api/sessions/${sessionId}`, { method: 'DELETE' });
+                await apiFetch(`/api/sessions/${sessionId}`, { method: 'DELETE' });
                 window.location.href = '/';
               }
             }}

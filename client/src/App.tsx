@@ -24,6 +24,7 @@ import {
   WSMessage,
 } from './types';
 import { useWebSocket } from './hooks/useWebSocket';
+import { newClientId, postJson, setSessionToken } from './api';
 import { useAudioCapture } from './hooks/useAudioCapture';
 import { DesktopAgentView } from './views/DesktopAgentView';
 import { SecondScreenView } from './views/SecondScreenView';
@@ -77,12 +78,14 @@ export function App() {
     switch (msg.event) {
       case 'session.created': {
         const sess = msg.payload as SessionState;
+        setSessionToken(sess.token);
         setSession(sess);
         break;
       }
 
       case 'session.joined': {
         const { session: sess, transcripts: trs, questions: qs, answers: ansList, notes: nts, currentQuestion: curQ } = msg.payload;
+        setSessionToken(sess.token);
         setSession(sess);
         setTranscripts(trs || []);
         setQuestions(qs || []);
@@ -181,21 +184,23 @@ export function App() {
       }
 
       case 'answer.token': {
-        const { answerId, token, accumulated } = msg.payload;
+        // Tokens are deltas tagged with their answer id; ignore tokens of superseded answers.
+        const { answerId, token } = msg.payload as { answerId: string; token: string };
         setCurrentAnswer(prev => {
-          if (!prev) return null;
-          return {
-            ...prev,
-            fullContent: accumulated,
-          };
+          if (!prev || prev.id !== answerId) return prev;
+          return { ...prev, fullContent: (prev.fullContent || '') + token };
         });
         break;
       }
 
       case 'answer.completed': {
         const answer = msg.payload as GeneratedAnswer;
-        setCurrentAnswer(answer);
-        setAnswers(prev => new Map(prev).set(answer.questionId, answer));
+        setCurrentAnswer(prev => (!prev || prev.id === answer.id ? answer : prev));
+        setAnswers(prev => {
+          const existing = prev.get(answer.questionId);
+          if (existing && existing.id !== answer.id && existing.timestamp > answer.timestamp) return prev;
+          return new Map(prev).set(answer.questionId, answer);
+        });
         break;
       }
 
@@ -238,115 +243,51 @@ export function App() {
   const sessionRef = useRef<SessionState | null>(session);
   sessionRef.current = session;
 
-  const { isConnected, latencyMs, send, registerSession } = useWebSocket(handleWebSocketMessage);
+  const { latencyMs, send, registerSession, isOpen } = useWebSocket(handleWebSocketMessage);
 
-  // Ingest transcripts optimistically locally, over WebSocket, and via REST for 100% guarantee
+  // Ingest a final transcript exactly once: over the WebSocket when connected, otherwise via REST.
+  // The client-generated id makes the server ignore any duplicate of the same utterance.
   const handleIngestTranscript = useCallback((speaker: 'OTHER' | 'YOU', text: string) => {
-    const curSession = sessionRef.current || session;
-    if (!curSession || !text.trim()) return;
+    const curSession = sessionRef.current;
+    const cleanText = text.trim();
+    if (!curSession || !cleanText) return;
 
+    const clientId = newClientId();
     const tempItem: TranscriptItem = {
-      id: `tr-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      id: `tr-${clientId}`,
       sessionId: curSession.id,
       speaker,
-      text: text.trim(),
+      text: cleanText,
       isFinal: true,
       timestamp: Date.now(),
       confidence: 0.98,
     };
 
-    // 1. Immediate optimistic UI update
-    setTranscripts(prev => {
-      if (prev.some(t => t.text === tempItem.text && Math.abs(t.timestamp - tempItem.timestamp) < 1000)) {
-        return prev;
-      }
-      return [...prev, tempItem];
-    });
+    // Optimistic UI update; the server echo has the same id and is de-duplicated
+    setTranscripts(prev => (prev.some(t => t.id === tempItem.id) ? prev : [...prev, tempItem]));
 
-    // 2. Real-time WebSocket broadcast to all connected devices
-    send('transcript.final', { speaker, text: text.trim() }, curSession.id);
-
-    // 3. Reliable REST backup ingestion (guarantees question detection and DB sync)
-    fetch(`/api/sessions/${curSession.id}/transcripts`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ speaker, text: text.trim(), isFinal: true }),
-    }).catch(err => console.warn('[App] Transcript REST ingestion note:', err));
-  }, [session, send]);
+    if (isOpen()) {
+      send('transcript.final', { speaker, text: cleanText, clientId }, curSession.id);
+    } else {
+      postJson(`/api/sessions/${curSession.id}/transcripts`, { speaker, text: cleanText, clientId })
+        .catch(err => console.warn('[App] Transcript REST ingestion failed:', err));
+    }
+  }, [send, isOpen]);
 
   // Audio Chunk Slicing Callback for Cloud / Whisper Transcription
   const handleAudioSlice = useCallback(async (speaker: 'YOU' | 'OTHER', audioBase64: string, mimeType: string) => {
-    const curSession = sessionRef.current || session;
+    const curSession = sessionRef.current;
     if (!curSession || !audioBase64) return;
     try {
-      const res = await fetch(`/api/sessions/${curSession.id}/transcribe-audio`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ audioBase64, mimeType, speaker }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.text) {
-          console.log(`[AudioCapture] Successfully transcribed ${speaker} audio: "${data.text}"`);
-        }
-      } else {
+      const res = await postJson(`/api/sessions/${curSession.id}/transcribe-audio`, { audioBase64, mimeType, speaker });
+      if (!res.ok) {
         const errText = await res.text().catch(() => '');
         console.warn(`[AudioCapture] Transcribe HTTP ${res.status}:`, errText);
       }
     } catch (err: any) {
       console.warn('[AudioCapture] Transcribe error:', err.message);
     }
-  }, [session]);
-
-  // Mobile resilience: background poll for transcripts every 3s in case mobile screen pauses WebSocket
-  useEffect(() => {
-    if (appMode !== 'second_screen' || !session?.id) return;
-    const pollInterval = setInterval(async () => {
-      try {
-        const res = await fetch(`/api/sessions/${session.id}/transcripts`);
-        if (res.ok) {
-          const list: TranscriptItem[] = await res.json();
-          if (Array.isArray(list) && list.length > 0) {
-            setTranscripts(prev => {
-              const existingIds = new Set(prev.map(t => t.id));
-              const missing = list.filter(t => !existingIds.has(t.id));
-              if (missing.length === 0) return prev;
-              return [...prev, ...missing];
-            });
-          }
-        }
-      } catch {}
-    }, 3000);
-    return () => clearInterval(pollInterval);
-  }, [appMode, session?.id]);
-
-  // Desktop Agent resilience: background poll for connected devices and primary status every 3s
-  useEffect(() => {
-    if (appMode !== 'desktop' || !session?.id || session.status === 'ended') return;
-    const pollDevices = setInterval(async () => {
-      try {
-        const res = await fetch(`/api/sessions/${session.id}`);
-        if (res.ok) {
-          const data = await res.json();
-          if (data?.devices && Array.isArray(data.devices)) {
-            setSession(prev => {
-              if (!prev || prev.status === 'ended') return prev;
-              const prevDevs = prev.devices || [];
-              const nextDevs = data.devices || [];
-              const hasChanged = prevDevs.length !== nextDevs.length ||
-                prev.primaryConnected !== data.primaryConnected ||
-                JSON.stringify(prevDevs.map(d => d.id)) !== JSON.stringify(nextDevs.map(d => d.id));
-              if (hasChanged) {
-                return { ...prev, devices: nextDevs, primaryConnected: data.primaryConnected };
-              }
-              return prev;
-            });
-          }
-        }
-      } catch {}
-    }, 3000);
-    return () => clearInterval(pollDevices);
-  }, [appMode, session?.id, session?.status]);
+  }, []);
 
   // Audio Capture Hook with both Web Speech API and MediaRecorder chunk streaming
   const {
@@ -399,119 +340,93 @@ export function App() {
   const handleCreateSession = async (
     type: SessionType,
     title: string,
-    profile: ContextProfile,
+    profile: ContextProfile | undefined,
     experienceLevel: ExperienceLevel
   ) => {
-    try {
-      const res = await fetch('/api/sessions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type, title, profile, experienceLevel }),
-      });
-      if (res.ok) {
-        const newSession: SessionState = await res.json();
-        setSession(newSession);
+    const primaryDev: DeviceInfo = {
+      id: 'primary-capture-device',
+      name: 'Primary Desktop Agent (Mac/PC)',
+      type: 'CAPTURE',
+      role: 'PRIMARY_CAPTURE',
+      connectedAt: Date.now(),
+      lastSeen: Date.now(),
+    };
 
-        const primaryDev: DeviceInfo = {
-          id: 'primary-capture-device',
-          name: 'Primary Desktop Agent (Mac/PC)',
-          type: 'CAPTURE',
-          role: 'PRIMARY_CAPTURE',
-          connectedAt: Date.now(),
-          lastSeen: Date.now(),
-        };
-        registerSession(newSession.id, newSession.code, primaryDev);
-        send('session.join', {
-          sessionId: newSession.id,
-          code: newSession.code,
-          device: primaryDev,
-        }, newSession.id);
-      } else {
-        throw new Error('API session creation non-200');
-      }
+    try {
+      const res = await postJson('/api/sessions', { type, title, profile, experienceLevel });
+      if (!res.ok) throw new Error(`Session creation failed (HTTP ${res.status})`);
+      const newSession: SessionState = await res.json();
+      setSessionToken(newSession.token);
+      setSession(newSession);
+      sessionRef.current = newSession;
+
+      registerSession(newSession.id, newSession.code, primaryDev, newSession.token);
+      send('session.join', {
+        sessionId: newSession.id,
+        token: newSession.token,
+        device: primaryDev,
+      }, newSession.id);
     } catch (err) {
-      console.warn('[App] Direct API create session failed, falling back to WebSocket:', err);
-      send('session.create', {
-        type,
-        title,
-        profile,
-        experienceLevel,
-      });
+      console.warn('[App] REST session creation failed, falling back to WebSocket:', err);
+      send('session.create', { type, title, profile, experienceLevel });
     }
   };
 
   const handleJoinSession = async (code: string, device: DeviceInfo) => {
     const cleanCode = code.trim().toUpperCase();
-    try {
-      const res = await fetch(`/api/sessions/code/${cleanCode}`);
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(errData.error || 'Session code not found or expired.');
-      }
-
-      const data = await res.json();
-
-      // 1. Guaranteed device pairing via REST first (persisted in SQLite & broadcast to Desktop Agent)
-      try {
-        const devRes = await fetch(`/api/sessions/${data.id}/devices`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(device),
-        });
-        if (devRes.ok) {
-          const devData = await devRes.json();
-          if (devData.session?.devices) {
-            data.devices = devData.session.devices;
-          }
-        }
-      } catch (devErr) {
-        console.warn('[App] Device pairing REST call notice:', devErr);
-      }
-
-      setSession(data);
-      sessionRef.current = data;
-      setTranscripts(data.transcripts || []);
-      setQuestions(data.questions || []);
-      setCurrentQuestion(data.currentQuestion || null);
-      setNotes(data.notes || []);
-
-      const ansMap = new Map<string, GeneratedAnswer>();
-      if (data.answers) {
-        data.answers.forEach((a: GeneratedAnswer) => ansMap.set(a.questionId, a));
-        setAnswers(ansMap);
-        if (data.currentQuestion && ansMap.has(data.currentQuestion.id)) {
-          setCurrentAnswer(ansMap.get(data.currentQuestion.id)!);
-        }
-      }
-
-      // Switch IMMEDIATELY to second screen workspace!
-      setAppMode('second_screen');
-
-      // Register session for persistent auto-reconnect and join on WebSocket
-      registerSession(data.id, cleanCode, device);
-      send('session.join', { code: cleanCode, sessionId: data.id, device }, data.id);
-    } catch (err: any) {
-      console.warn('[App] Direct join failed, trying WebSocket join:', err);
-      registerSession(undefined, cleanCode, device);
-      send('session.join', { code: cleanCode, device });
-      throw err;
+    const res = await fetch(`/api/sessions/code/${encodeURIComponent(cleanCode)}`);
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData.message || 'Session code not found or expired.');
     }
+
+    const data = await res.json();
+    setSessionToken(data.token);
+
+    // Register the device via REST (persisted in SQLite and broadcast to the Desktop Agent)
+    try {
+      const devRes = await postJson(`/api/sessions/${data.id}/devices`, device);
+      if (devRes.ok) {
+        const devData = await devRes.json();
+        if (devData.devices) data.devices = devData.devices;
+      }
+    } catch (devErr) {
+      console.warn('[App] Device pairing REST call failed:', devErr);
+    }
+
+    setSession(data);
+    sessionRef.current = data;
+    setTranscripts(data.transcripts || []);
+    setQuestions(data.questions || []);
+    setCurrentQuestion(data.currentQuestion || null);
+    setNotes(data.notes || []);
+
+    const ansMap = new Map<string, GeneratedAnswer>();
+    (data.answers || []).forEach((a: GeneratedAnswer) => ansMap.set(a.questionId, a));
+    setAnswers(ansMap);
+    if (data.currentQuestion && ansMap.has(data.currentQuestion.id)) {
+      setCurrentAnswer(ansMap.get(data.currentQuestion.id)!);
+    }
+
+    setAppMode('second_screen');
+
+    // Join the live stream with the session token (also used for automatic reconnects)
+    registerSession(data.id, cleanCode, device, data.token);
+    send('session.join', { sessionId: data.id, token: data.token, device }, data.id);
   };
 
   const handlePauseSession = async () => {
     if (!session) return;
     pauseAudioCapture();
     setSession(prev => prev ? { ...prev, status: 'paused' } : null);
-    send('session.pause', {}, session.id);
-    fetch(`/api/sessions/${session.id}/pause`, { method: 'POST' }).catch(() => {});
+    postJson(`/api/sessions/${session.id}/pause`).catch(() => send('session.pause', {}, session.id));
   };
 
   const handleResumeSession = async () => {
     if (!session) return;
     resumeAudioCapture();
     setSession(prev => prev ? { ...prev, status: 'active' } : null);
-    send('session.resume', {}, session.id);
-    fetch(`/api/sessions/${session.id}/resume`, { method: 'POST' }).catch(() => {});
+    postJson(`/api/sessions/${session.id}/resume`).catch(() => send('session.resume', {}, session.id));
   };
 
   const handleEndSession = async () => {
@@ -521,18 +436,18 @@ export function App() {
     stopSystemAudio();
     // 2. Set ended status locally to freeze UI immediately without lag
     setSession(prev => prev ? { ...prev, status: 'ended' } : null);
-    // 3. Notify backend via WebSocket
-    send('session.end', {}, session.id);
-    // 4. Guaranteed REST call
+    // 3. Notify backend (REST; WebSocket only if REST is unreachable)
     try {
-      const res = await fetch(`/api/sessions/${session.id}/end`, { method: 'POST' });
+      const res = await postJson(`/api/sessions/${session.id}/end`);
       if (res.ok) {
         const data = await res.json();
         if (data.session) {
           setSession(prev => prev ? { ...prev, status: 'ended', durationSeconds: data.session.durationSeconds } : null);
         }
       }
-    } catch {}
+    } catch {
+      send('session.end', {}, session.id);
+    }
   };
 
   const handleLengthModeChange = (mode: AnswerLengthMode) => {
@@ -713,11 +628,7 @@ export function App() {
           <ContextProfileView
             initialProfile={session?.profile}
             onSaveProfile={(prof) => {
-              fetch('/api/profiles', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(prof),
-              });
+              postJson('/api/profiles', prof).catch(err => console.warn('[App] Saving profile failed:', err));
               if (session) {
                 setSession({ ...session, profile: prof });
               }

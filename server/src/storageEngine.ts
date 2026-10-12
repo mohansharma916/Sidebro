@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import path from 'path';
 import fs from 'fs';
+import { fileURLToPath } from 'url';
 import {
   ContextProfile,
   DetectedQuestion,
@@ -53,9 +54,13 @@ export class StorageEngine {
   private dbPath: string;
 
   constructor(customPath?: string) {
+    // Resolve relative to this module (server/dist -> server/data), not the process cwd,
+    // so dev, `npm start` and Docker all use the same directory. DATA_DIR overrides it.
     const dataDir = customPath
       ? path.dirname(customPath)
-      : path.resolve(process.cwd(), 'server/data');
+      : process.env.DATA_DIR
+        ? path.resolve(process.env.DATA_DIR)
+        : fileURLToPath(new URL('../data', import.meta.url));
 
     if (!fs.existsSync(dataDir)) {
       try {
@@ -189,6 +194,43 @@ export class StorageEngine {
         created_at INTEGER NOT NULL
       );
     `);
+
+    // 7. Context profiles (resume / JD / notes)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS profiles (
+        id TEXT PRIMARY KEY,
+        profile_json TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+
+    // Migration: per-session access token
+    const sessionCols = this.db.prepare('PRAGMA table_info(sessions)').all() as any[];
+    if (!sessionCols.some(c => c.name === 'token')) {
+      this.db.exec('ALTER TABLE sessions ADD COLUMN token TEXT');
+    }
+  }
+
+  // --- Profile Methods ---
+
+  public saveProfile(profile: ContextProfile): void {
+    this.db.prepare(`
+      INSERT INTO profiles (id, profile_json, updated_at) VALUES (?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET profile_json = excluded.profile_json, updated_at = excluded.updated_at
+    `).run(profile.id, JSON.stringify(profile), Date.now());
+  }
+
+  public getAllProfiles(): ContextProfile[] {
+    const rows = this.db.prepare('SELECT profile_json FROM profiles ORDER BY updated_at DESC').all() as any[];
+    const profiles: ContextProfile[] = [];
+    for (const r of rows) {
+      try { profiles.push(JSON.parse(r.profile_json)); } catch {}
+    }
+    return profiles;
+  }
+
+  public deleteProfile(id: string): void {
+    this.db.prepare('DELETE FROM profiles WHERE id = ?').run(id);
   }
 
   // --- Session Methods ---
@@ -197,9 +239,10 @@ export class StorageEngine {
     const stmt = this.db.prepare(`
       INSERT INTO sessions (
         id, code, title, type, status, created_at, started_at, ended_at,
-        duration_seconds, answer_length, experience_level, profile_json, devices_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        duration_seconds, answer_length, experience_level, profile_json, devices_json, token
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
+        token = COALESCE(sessions.token, excluded.token),
         title = excluded.title,
         status = excluded.status,
         started_at = excluded.started_at,
@@ -223,7 +266,8 @@ export class StorageEngine {
       session.answerLength || 'normal',
       session.experienceLevel || 'senior',
       session.profile ? JSON.stringify(session.profile) : null,
-      session.devices ? JSON.stringify(session.devices) : '[]'
+      session.devices ? JSON.stringify(session.devices) : '[]',
+      session.token || null
     );
   }
 
@@ -267,14 +311,27 @@ export class StorageEngine {
     return rows.map(r => this.mapSessionRow(r));
   }
 
+  public updateSessionDuration(sessionId: string, durationSeconds: number): void {
+    this.db.prepare('UPDATE sessions SET duration_seconds = ? WHERE id = ?').run(durationSeconds, sessionId);
+  }
+
   public deleteSession(sessionId: string): boolean {
-    this.db.prepare('DELETE FROM transcripts WHERE session_id = ?').run(sessionId);
-    this.db.prepare('DELETE FROM questions WHERE session_id = ?').run(sessionId);
-    this.db.prepare('DELETE FROM answers WHERE session_id = ?').run(sessionId);
-    this.db.prepare('DELETE FROM notes WHERE session_id = ?').run(sessionId);
-    this.db.prepare('DELETE FROM analytics_summaries WHERE session_id = ?').run(sessionId);
-    this.db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
+    this.db.exec('BEGIN');
+    try {
+      for (const table of ['transcripts', 'questions', 'answers', 'notes', 'analytics_summaries']) {
+        this.db.prepare(`DELETE FROM ${table} WHERE session_id = ?`).run(sessionId);
+      }
+      this.db.prepare('DELETE FROM sessions WHERE id = ?').run(sessionId);
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
     return true;
+  }
+
+  public close(): void {
+    this.db.close();
   }
 
   private mapSessionRow(row: any): SessionState {
@@ -292,6 +349,7 @@ export class StorageEngine {
     return {
       id: row.id,
       code: row.code,
+      token: row.token || undefined,
       title: row.title,
       type: row.type,
       status: row.status,

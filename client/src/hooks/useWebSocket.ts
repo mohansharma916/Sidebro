@@ -1,32 +1,54 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { WSMessage, WSEventType, DeviceInfo } from '../types';
 
+const RECONNECT_BASE_MS = 1000;
+const RECONNECT_MAX_MS = 15000;
+
+interface ActiveSession {
+  sessionId?: string;
+  token?: string;
+  code?: string;
+  device?: DeviceInfo;
+}
+
 export function useWebSocket(onEvent?: (msg: WSMessage) => void) {
   const wsRef = useRef<WebSocket | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [latencyMs, setLatencyMs] = useState<number>(24);
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const pingIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const reconnectAttemptsRef = useRef(0);
+  const disposedRef = useRef(false);
   const onEventRef = useRef(onEvent);
   onEventRef.current = onEvent;
 
-  // Track session details for automatic re-joining upon reconnect
-  const activeSessionRef = useRef<{ sessionId?: string; code?: string; device?: DeviceInfo } | null>(null);
+  // Session credentials for automatic re-joining upon reconnect
+  const activeSessionRef = useRef<ActiveSession | null>(null);
   const pendingQueueRef = useRef<string[]>([]);
   const preferProxyRef = useRef<boolean>(false);
 
-  const registerSession = useCallback((sessionId?: string, code?: string, device?: DeviceInfo) => {
-    activeSessionRef.current = { sessionId, code, device };
+  const registerSession = useCallback((sessionId?: string, code?: string, device?: DeviceInfo, token?: string) => {
+    activeSessionRef.current = { sessionId, code, device, token };
   }, []);
 
+  const buildJoinMessage = (s: ActiveSession): WSMessage => ({
+    event: 'session.join',
+    sessionId: s.sessionId,
+    // Prefer the token (works after the pairing code expires); fall back to the code.
+    payload: s.sessionId && s.token
+      ? { sessionId: s.sessionId, token: s.token, device: s.device }
+      : { code: s.code, device: s.device },
+  });
+
   const connect = useCallback(() => {
+    if (disposedRef.current) return;
     if (wsRef.current && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) {
       return;
     }
 
     const isHttps = window.location.protocol === 'https:';
     const protocol = isHttps ? 'wss:' : 'ws:';
-    
+
     // Resolve hostname safely (prefer IPv4 127.0.0.1 over localhost to prevent macOS IPv6 ECONNREFUSED)
     let host = window.location.hostname;
     if (!host || host === 'localhost' || host === '0.0.0.0') {
@@ -45,29 +67,26 @@ export function useWebSocket(onEvent?: (msg: WSMessage) => void) {
       wsUrl = `${protocol}//${window.location.host}/ws`;
     }
 
+    const scheduleReconnect = () => {
+      if (disposedRef.current) return;
+      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+      const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** reconnectAttemptsRef.current);
+      reconnectAttemptsRef.current++;
+      reconnectTimeoutRef.current = setTimeout(connect, delay);
+    };
+
     try {
-      console.log(`[WebSocket] Connecting to ${wsUrl}...`);
       const ws = new WebSocket(wsUrl);
       wsRef.current = ws;
 
       ws.onopen = () => {
-        console.log('[WebSocket] Connected successfully!');
         setIsConnected(true);
+        reconnectAttemptsRef.current = 0;
         if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
 
-        // Auto re-join session if registered
+        // Auto re-join session if registered (this is the only place joins are sent while offline)
         if (activeSessionRef.current) {
-          console.log('[WebSocket] Auto-rejoining session:', activeSessionRef.current.sessionId || activeSessionRef.current.code);
-          const joinMsg: WSMessage = {
-            event: 'session.join',
-            sessionId: activeSessionRef.current.sessionId,
-            payload: {
-              sessionId: activeSessionRef.current.sessionId,
-              code: activeSessionRef.current.code,
-              device: activeSessionRef.current.device,
-            },
-          };
-          ws.send(JSON.stringify(joinMsg));
+          ws.send(JSON.stringify(buildJoinMessage(activeSessionRef.current)));
         }
 
         // Flush any queued messages
@@ -84,7 +103,6 @@ export function useWebSocket(onEvent?: (msg: WSMessage) => void) {
           if (ws.readyState === WebSocket.OPEN) {
             const pingMsg: WSMessage = {
               event: 'ping',
-              sessionId: activeSessionRef.current?.sessionId,
               payload: { time: Date.now() },
             };
             ws.send(JSON.stringify(pingMsg));
@@ -98,7 +116,6 @@ export function useWebSocket(onEvent?: (msg: WSMessage) => void) {
           if (data.event === 'pong' && data.payload?.time) {
             const roundTrip = Date.now() - data.payload.time;
             setLatencyMs(Math.max(4, roundTrip));
-            return;
           }
 
           if (onEventRef.current) {
@@ -109,65 +126,68 @@ export function useWebSocket(onEvent?: (msg: WSMessage) => void) {
         }
       };
 
-      ws.onclose = (event) => {
-        console.warn(`[WebSocket] Closed (code: ${event.code}). Scheduling reconnect in 1.5s...`);
+      ws.onclose = () => {
         setIsConnected(false);
-        wsRef.current = null;
+        if (wsRef.current === ws) wsRef.current = null;
         if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
-        if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
-
-        reconnectTimeoutRef.current = setTimeout(() => {
-          connect();
-        }, 1500);
+        scheduleReconnect();
       };
 
-      ws.onerror = (err) => {
-        console.warn('[WebSocket] Error, toggling proxy fallback and reconnecting:', err);
+      ws.onerror = () => {
         preferProxyRef.current = !preferProxyRef.current;
         try { ws.close(); } catch {}
       };
     } catch (err) {
       console.error('[WebSocket] Init error:', err);
       preferProxyRef.current = !preferProxyRef.current;
-      reconnectTimeoutRef.current = setTimeout(connect, 2000);
+      scheduleReconnect();
     }
   }, []);
 
   const send = useCallback((event: WSEventType, payload: any, sessionId?: string) => {
-    // If this is a join event, register session for auto-reconnect
+    const isOpen = wsRef.current?.readyState === WebSocket.OPEN;
+
     if (event === 'session.join') {
+      // Remember credentials; if the socket is down, onopen will send the join exactly once.
       activeSessionRef.current = {
         sessionId: payload?.sessionId || sessionId,
+        token: payload?.token,
         code: payload?.code,
         device: payload?.device,
       };
+      if (!isOpen) return;
     }
 
-    const targetSessionId = sessionId || activeSessionRef.current?.sessionId;
     const msg: WSMessage = {
       event,
-      sessionId: targetSessionId,
+      sessionId: sessionId || activeSessionRef.current?.sessionId,
       payload,
     };
     const serialized = JSON.stringify(msg);
 
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(serialized);
+    if (isOpen) {
+      wsRef.current!.send(serialized);
     } else {
       pendingQueueRef.current.push(serialized);
     }
   }, []);
 
+  /** True while the socket is open (synchronous check for callers that need a REST fallback). */
+  const isOpen = useCallback(() => wsRef.current?.readyState === WebSocket.OPEN, []);
+
   useEffect(() => {
+    disposedRef.current = false;
     connect();
     return () => {
+      disposedRef.current = true;
       if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
       if (pingIntervalRef.current) clearInterval(pingIntervalRef.current);
       if (wsRef.current) {
         wsRef.current.close();
+        wsRef.current = null;
       }
     };
   }, [connect]);
 
-  return { isConnected, latencyMs, send, registerSession };
+  return { isConnected, latencyMs, send, registerSession, isOpen };
 }

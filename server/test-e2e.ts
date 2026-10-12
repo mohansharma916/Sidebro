@@ -1,10 +1,14 @@
 import WebSocket from 'ws';
 
+// Run against a server started with `npm start` (or `npm run dev`) on port 3001.
+const BASE = process.env.SIDEBRO_URL || 'http://localhost:3001';
+const WS_URL = BASE.replace(/^http/, 'ws') + '/ws';
+
 async function runE2ETest() {
   console.log('🧪 Starting End-to-End Test for Real-Time AI Second-Screen Copilot...\n');
 
   // 1. Create Session via REST API
-  const res = await fetch('http://localhost:3001/api/sessions', {
+  const res = await fetch(`${BASE}/api/sessions`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -17,7 +21,7 @@ async function runE2ETest() {
   console.log(`✅ [1/7] Created Session: ID = ${session.id}, Code = ${session.code}`);
 
   // 2. Connect Primary Desktop Capture Agent over WebSocket
-  const primaryWs = new WebSocket('ws://localhost:3001/ws');
+  const primaryWs = new WebSocket(WS_URL);
   await new Promise(resolve => primaryWs.on('open', resolve));
   console.log('✅ [2/7] Primary Desktop Capture Agent connected to WebSocket');
 
@@ -26,6 +30,7 @@ async function runE2ETest() {
     event: 'session.join',
     payload: {
       sessionId: session.id,
+      token: session.token,
       device: {
         id: 'primary-mac-agent',
         name: 'MacBook Pro (Capture Agent)',
@@ -38,7 +43,7 @@ async function runE2ETest() {
   }));
 
   // 3. Connect Second Screen (Phone/Tablet) via 6-Character Code
-  const secondScreenWs = new WebSocket('ws://localhost:3001/ws');
+  const secondScreenWs = new WebSocket(WS_URL);
   await new Promise(resolve => secondScreenWs.on('open', resolve));
   console.log(`✅ [3/7] Second Screen connected to WebSocket via Code ${session.code}`);
 
@@ -133,7 +138,9 @@ async function runE2ETest() {
 
   await new Promise(r => setTimeout(r, 500));
 
-  const summaryRes = await fetch(`http://localhost:3001/api/sessions/${session.id}/summary`);
+  const summaryRes = await fetch(`${BASE}/api/sessions/${session.id}/summary`, {
+    headers: { 'x-session-token': session.token },
+  });
   const summary = await summaryRes.json();
   console.log('📈 Post-Session Summary Result:');
   console.log(`   - Total Questions: ${summary.totalQuestions}`);

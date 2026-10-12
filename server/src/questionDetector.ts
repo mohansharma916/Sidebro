@@ -5,7 +5,6 @@ interface QuestionBuffer {
   transcriptIds: string[];
   chunks: string[];
   timer: NodeJS.Timeout | null;
-  lastSpeaker: 'YOU' | 'OTHER';
   incompleteRetries: number;
 }
 
@@ -22,7 +21,17 @@ export class QuestionDetector {
    * Ingests a new transcript chunk and processes question buffering
    */
   public ingestTranscript(transcript: TranscriptItem): void {
-    // Only detect questions asked by OTHER speaker or explicit questions
+    // Only the interviewer's (OTHER) speech can trigger answers; the candidate's own speech never does.
+    // When the candidate starts talking, flush whatever the interviewer said so far.
+    if (transcript.speaker !== 'OTHER') {
+      const pending = this.buffers.get(transcript.sessionId);
+      if (pending && pending.chunks.length > 0) {
+        if (pending.timer) clearTimeout(pending.timer);
+        this.evaluateBuffer(transcript.sessionId);
+      }
+      return;
+    }
+
     const text = transcript.text.trim();
     if (!text || text.length < 2) return;
     if (/^[\s\.\,\?\!\-\_\:\;\'\"…]+$/.test(text)) return;
@@ -37,19 +46,11 @@ export class QuestionDetector {
         transcriptIds: [],
         chunks: [],
         timer: null,
-        lastSpeaker: transcript.speaker,
         incompleteRetries: 0,
       };
       this.buffers.set(sessionId, buf);
     }
 
-    // If speaker changes and we have a pending buffer, evaluate immediately
-    if (buf.lastSpeaker !== transcript.speaker && buf.chunks.length > 0) {
-      if (buf.timer) clearTimeout(buf.timer);
-      this.evaluateBuffer(sessionId);
-    }
-
-    buf.lastSpeaker = transcript.speaker;
     buf.chunks.push(text);
     buf.transcriptIds.push(transcript.id);
     buf.incompleteRetries = 0; // Reset retries on new speech chunk

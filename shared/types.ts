@@ -1,3 +1,6 @@
+// Canonical type definitions shared by client and server.
+// server/src/types.ts must stay byte-identical to this file (enforced by server/test/types-sync.test.mjs).
+
 export type SessionType = 
   | 'technical' 
   | 'behavioral' 
@@ -19,7 +22,8 @@ export type QuestionCategory =
   | 'Experience' 
   | 'Follow-up' 
   | 'Clarification' 
-  | 'General';
+  | 'General'
+  | 'manual';
 
 export type DeviceType = 'CAPTURE' | 'WEB' | 'MOBILE' | 'TABLET';
 
@@ -49,6 +53,8 @@ export interface ContextProfile {
 export interface SessionState {
   id: string;
   code: string;
+  /** Per-session secret. Required for every REST call and WebSocket join on this session. */
+  token?: string;
   title: string;
   type: SessionType;
   status: 'created' | 'active' | 'paused' | 'ended';
@@ -156,6 +162,10 @@ export type WSEventType =
   | 'action.regenerate'
   | 'note.create'
   | 'note.created'
+  | 'mock.start'
+  | 'mock.stop'
+  | 'mock.started'
+  | 'mock.stopped'
   | 'error';
 
 export interface WSMessage<T = any> {

@@ -25,6 +25,8 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 ENV PORT=3001
+# SQLite lives in the mounted volume below
+ENV DATA_DIR=/app/server/data
 
 # Copy package manifests
 COPY package*.json ./

@@ -1,33 +1,92 @@
 import { AnswerLengthMode, DetectedQuestion, GeneratedAnswer, SessionType } from './types.js';
 import { DocumentChunk } from './contextEngine.js';
 
+import dns from 'dns';
+
 export interface AnswerStreamCallbacks {
   onStart: (answer: GeneratedAnswer) => void;
-  onToken: (token: string, accumulated: string) => void;
+  onToken: (token: string) => void;
   onComplete: (answer: GeneratedAnswer) => void;
   onError: (err: any) => void;
 }
 
-import dns from 'dns';
+export type AnswerModifier = 'shorter' | 'expand' | 'example' | 'technical_detail' | 'star' | 'alternative';
+
 try {
   dns.setDefaultResultOrder('ipv4first');
 } catch {}
 
+/** Hard cap on a single answer stream, so a hung provider never blocks forever. */
+const PROVIDER_TIMEOUT_MS = 45_000;
+const OFFLINE_MODEL = 'offline-templates (no AI provider configured)';
+
+/** Tracks whether a provider already emitted tokens, so we never splice two providers' output together. */
+interface StreamState {
+  accumulated: string;
+  emitted: boolean;
+}
+
+/**
+ * Removes <think>...</think> reasoning blocks that some models (e.g. Qwen3) emit before the answer.
+ * Works incrementally on streamed deltas.
+ */
+export class ThinkFilter {
+  private inThink = false;
+  private pending = '';
+
+  push(delta: string): string {
+    this.pending += delta;
+    let out = '';
+    while (this.pending.length > 0) {
+      if (this.inThink) {
+        const end = this.pending.indexOf('</think>');
+        if (end === -1) {
+          // keep a tail in case the closing tag is split across chunks
+          this.pending = this.pending.slice(-8);
+          return out;
+        }
+        this.pending = this.pending.slice(end + '</think>'.length);
+        this.inThink = false;
+      } else {
+        const start = this.pending.indexOf('<think>');
+        if (start === -1) {
+          // hold back a possible partial "<think" at the end
+          const lt = this.pending.lastIndexOf('<');
+          if (lt !== -1 && '<think>'.startsWith(this.pending.slice(lt))) {
+            out += this.pending.slice(0, lt);
+            this.pending = this.pending.slice(lt);
+          } else {
+            out += this.pending;
+            this.pending = '';
+          }
+          return out;
+        }
+        out += this.pending.slice(0, start);
+        this.pending = this.pending.slice(start + '<think>'.length);
+        this.inThink = true;
+      }
+    }
+    return out;
+  }
+
+  flush(): string {
+    const rest = this.inThink ? '' : this.pending;
+    this.pending = '';
+    return rest;
+  }
+}
+
 export class AIEngine {
   private groqApiKey: string | undefined;
   private geminiApiKey: string | undefined;
-  private openaiApiKey: string | undefined;
+  private groqModel: string;
+  private geminiModel: string;
 
   constructor() {
     this.groqApiKey = process.env.GROQ_API_KEY;
     this.geminiApiKey = process.env.GEMINI_API_KEY;
-    this.openaiApiKey = process.env.OPENAI_API_KEY;
-  }
-
-  public setApiKey(provider: 'groq' | 'gemini' | 'openai', key: string): void {
-    if (provider === 'groq') this.groqApiKey = key;
-    if (provider === 'gemini') this.geminiApiKey = key;
-    if (provider === 'openai') this.openaiApiKey = key;
+    this.groqModel = process.env.GROQ_MODEL || 'qwen/qwen3.8-27b';
+    this.geminiModel = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
   }
 
   /**
@@ -40,89 +99,139 @@ export class AIEngine {
     contextChunks: DocumentChunk[],
     recentTranscripts: { speaker: string; text: string }[],
     callbacks: AnswerStreamCallbacks,
-    actionModifier?: 'shorter' | 'expand' | 'example' | 'technical_detail' | 'star' | 'alternative'
+    actionModifier?: AnswerModifier,
+    signal?: AbortSignal
   ): Promise<void> {
     const startTime = Date.now();
 
     const answerId = `ans-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
     const contextSummary = contextChunks.map(c => `[${c.source.toUpperCase()}]: ${c.content}`).join('\n\n');
+    const hasProvider = !!(this.groqApiKey || this.geminiApiKey);
 
-    // Build initial placeholder answer
-    const structuredResponse = this.generateStructuredResponse(
-      question.questionText,
-      question.type,
-      sessionType,
-      lengthMode,
-      contextChunks,
-      actionModifier
-    );
-
-    const initialAnswer: GeneratedAnswer = {
+    // With a real provider the answer starts empty and is filled only from the model's output,
+    // so no template text can leak into it.
+    const answer: GeneratedAnswer = {
       id: answerId,
       questionId: question.id,
       sessionId: question.sessionId,
       questionText: question.questionText,
-      directAnswer: structuredResponse.directAnswer,
-      keyPoints: structuredResponse.keyPoints,
-      exampleOrSnippet: (this.groqApiKey || this.geminiApiKey) ? undefined : structuredResponse.exampleOrSnippet,
-      followUpQuestions: structuredResponse.followUpQuestions,
+      directAnswer: '',
+      keyPoints: [],
+      followUpQuestions: [],
       fullContent: '',
       isComplete: false,
       lengthMode,
-      model: this.groqApiKey ? 'qwen/qwen3.8-27b (Groq)' : this.geminiApiKey ? 'gemini-2.0-flash' : 'sidebro-expert-engine',
+      model: this.groqApiKey ? `${this.groqModel} (Groq)` : this.geminiApiKey ? this.geminiModel : OFFLINE_MODEL,
       contextUsed: contextChunks.map(c => c.source),
       timestamp: Date.now(),
     };
 
-    callbacks.onStart(initialAnswer);
+    const state: StreamState = { accumulated: '', emitted: false };
+    const emit = (token: string) => {
+      if (!token) return;
+      if (!state.emitted) {
+        answer.firstTokenLatencyMs = Date.now() - startTime;
+        state.emitted = true;
+      }
+      state.accumulated += token;
+      callbacks.onToken(token);
+    };
 
-    // 1. Primary: Ultra-fast Groq streaming (<250ms latency)
+    if (!hasProvider) {
+      const structured = this.generateStructuredResponse(
+        question.questionText,
+        question.type,
+        sessionType,
+        lengthMode,
+        contextChunks,
+        actionModifier
+      );
+      answer.directAnswer = structured.directAnswer;
+      answer.keyPoints = structured.keyPoints;
+      answer.exampleOrSnippet = structured.exampleOrSnippet;
+      answer.followUpQuestions = structured.followUpQuestions;
+      callbacks.onStart(answer);
+      await this.simulateTokenStream(structured.fullContent, emit, signal);
+      this.finish(answer, state, startTime, callbacks, false);
+      return;
+    }
+
+    callbacks.onStart(answer);
+
+    const providers: { name: string; run: (sig: AbortSignal) => Promise<void> }[] = [];
     if (this.groqApiKey) {
-      try {
-        await this.streamFromGroq(
-          question.questionText,
-          sessionType,
-          lengthMode,
-          contextSummary,
-          recentTranscripts,
-          actionModifier,
-          callbacks,
-          initialAnswer,
-          startTime
-        );
-        return;
-      } catch (err) {
-        console.warn('[AIEngine] Groq stream failed, falling back to next provider:', err);
-      }
+      providers.push({
+        name: 'Groq',
+        run: sig => this.streamFromGroq(question.questionText, sessionType, lengthMode, contextSummary, recentTranscripts, actionModifier, emit, sig),
+      });
     }
-
-    // 2. Secondary: Gemini API stream if configured
     if (this.geminiApiKey) {
+      providers.push({
+        name: 'Gemini',
+        run: sig => this.streamFromGemini(question.questionText, sessionType, lengthMode, contextSummary, recentTranscripts, actionModifier, emit, sig),
+      });
+    }
+
+    let lastError: any;
+    for (const provider of providers) {
+      const sig = signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(PROVIDER_TIMEOUT_MS)])
+        : AbortSignal.timeout(PROVIDER_TIMEOUT_MS);
       try {
-        await this.streamFromGemini(
-          question.questionText,
-          sessionType,
-          lengthMode,
-          contextSummary,
-          recentTranscripts,
-          actionModifier,
-          callbacks,
-          initialAnswer,
-          startTime
-        );
+        answer.model = provider.name === 'Groq' ? `${this.groqModel} (Groq)` : this.geminiModel;
+        await provider.run(sig);
+        this.finish(answer, state, startTime, callbacks, true);
         return;
       } catch (err) {
-        console.warn('[AIEngine] Gemini API stream failed, falling back to built-in expert engine:', err);
+        lastError = err;
+        if (signal?.aborted) {
+          // Superseded by a newer question: keep whatever was streamed so far.
+          this.finish(answer, state, startTime, callbacks, true);
+          return;
+        }
+        if (state.emitted) {
+          // Failed mid-stream. Falling back now would splice two different answers together.
+          console.warn(`[AIEngine] ${provider.name} stream failed after output started:`, (err as Error)?.message);
+          this.finish(answer, state, startTime, callbacks, true);
+          callbacks.onError(new Error(`${provider.name} stream was interrupted; the answer may be incomplete.`));
+          return;
+        }
+        console.warn(`[AIEngine] ${provider.name} failed before output, trying next provider:`, (err as Error)?.message);
       }
     }
 
-    // 3. Fallback: High-fidelity token-by-token streaming
-    await this.simulateTokenStream(
-      structuredResponse.fullContent,
-      callbacks,
-      initialAnswer,
-      startTime
+    // Every configured provider failed before producing output.
+    answer.model = OFFLINE_MODEL;
+    const structured = this.generateStructuredResponse(
+      question.questionText, question.type, sessionType, lengthMode, contextChunks, actionModifier
     );
+    answer.directAnswer = structured.directAnswer;
+    answer.keyPoints = structured.keyPoints;
+    answer.exampleOrSnippet = structured.exampleOrSnippet;
+    answer.followUpQuestions = structured.followUpQuestions;
+    callbacks.onError(new Error(`AI provider unavailable (${lastError?.message || 'unknown error'}); showing offline template.`));
+    await this.simulateTokenStream(structured.fullContent, emit, signal);
+    this.finish(answer, state, startTime, callbacks, false);
+  }
+
+  private finish(
+    answer: GeneratedAnswer,
+    state: StreamState,
+    startTime: number,
+    callbacks: AnswerStreamCallbacks,
+    parseSections: boolean
+  ): void {
+    if (parseSections) {
+      const parsed = this.parseStructuredSections(state.accumulated);
+      answer.directAnswer = parsed.directAnswer;
+      answer.keyPoints = parsed.keyPoints;
+      answer.exampleOrSnippet = parsed.exampleOrSnippet;
+      answer.followUpQuestions = parsed.followUpQuestions || [];
+    }
+    answer.fullContent = state.accumulated;
+    answer.isComplete = true;
+    answer.totalLatencyMs = Date.now() - startTime;
+    callbacks.onComplete(answer);
   }
 
   /**
@@ -210,54 +319,50 @@ public:
       return this.formatAnswer(direct, points, snippet, followUps, lengthMode, modifier);
     }
 
-    // 3. Performance Improvement / FlatList / Mobile Optimization
-    if (qLower.includes('performance') || qLower.includes('flatlist') || qLower.includes('improved')) {
-      const direct = "I improved application performance by 42% through migrating list virtualization to FlashList/recycling, eliminating bridge serialization bottlenecks with JSI, and optimizing the React render tree with memoization and Web Workers.";
+    // 3. Mobile list / rendering performance (conceptual techniques, no invented results)
+    if (qLower.includes('flatlist') || (qLower.includes('performance') && (qLower.includes('react') || qLower.includes('mobile') || qLower.includes('list')))) {
+      const direct = "Typical levers for React / React Native performance are list virtualization with view recycling, avoiding unnecessary re-renders, and moving heavy work off the JS thread. Back any claim with numbers from your own projects.";
       const points = [
-        "**View Recycling**: Replaced FlatList with recycling architecture (FlashList/Shopify), reusing native cell views rather than creating/destroying view nodes during rapid scroll.",
-        "**Heavy Compute Offloading**: Offloaded large JSON data transformations and image hashing into background C++ threads via JSI / Web Workers.",
-        "**Render Optimization**: Implemented strict React.memo, stable callbacks (`useCallback`), and split state into atomic stores (Zustand) to stop cascade re-renders.",
-        "**Hermes Bytecode**: Precompiled JavaScript to Hermes bytecode at build time, shrinking TTI (Time to Interactive) by 45% and memory by 35MB."
+        "**View Recycling**: Recycling lists (e.g. FlashList) reuse native cells instead of creating and destroying views during fast scrolls.",
+        "**Render Optimization**: `React.memo`, stable callbacks (`useCallback`) and smaller state slices stop cascading re-renders.",
+        "**Off-Thread Work**: Move large data transforms or hashing to background threads (JSI modules, workers) so the UI thread keeps 60 FPS.",
+        "**Measure First**: Profile with Flipper / React DevTools / platform profilers and track FPS, JS frame time and TTI before and after."
       ];
-      const snippet = `// High-performance virtualization configuration
+      const snippet = `// Virtualized list configuration
 <FlashList
-  data={heavyFeedItems}
+  data={items}
   estimatedItemSize={88}
-  renderItem={renderFeedItem}
+  renderItem={renderItem}
   keyExtractor={item => item.id}
-  removeClippedSubviews={true}
-  maxToRenderPerBatch={10}
-  windowSize={5}
 />`;
       const followUps = [
-        "How do you profile memory leaks using Xcode Instruments and Android Studio Profiler?",
-        "What metrics (e.g. FPS, JS Frame Time, TTI) do you track in production APM?",
-        "How do you handle complex nested scroll views without dropping 60 FPS?"
+        "How do you profile memory leaks on iOS and Android?",
+        "Which performance metrics do you track in production?",
+        "How do you keep nested scroll views smooth?"
       ];
 
       return this.formatAnswer(direct, points, snippet, followUps, lengthMode, modifier);
     }
 
-    // 4. Behavioral STAR Question (Conflict, Production Incident, Challenge)
-    if (category === 'Behavioral' || qLower.includes('time') || qLower.includes('challenge') || qLower.includes('incident')) {
-      const direct = "During a Black Friday traffic surge, our primary Redis cluster hit 98% memory capacity causing a cache-stampede incident. I led the incident response, mitigated the stampede within 18 minutes, and re-architected our caching layer.";
+    // 4. Behavioral STAR question: give structure, never invent the candidate's story
+    if (category === 'Behavioral' || /\btell me about a time\b|\bdescribe a (situation|time)\b|\bbiggest challenge\b/.test(qLower)) {
+      const ownNotes = context.find(c => c.source === 'projectNotes') || context[0];
+      const direct = ownNotes
+        ? `Answer with a real example from your own experience. Closest match in your profile: "${ownNotes.content.slice(0, 160)}${ownNotes.content.length > 160 ? '…' : ''}"`
+        : "Answer with a real example from your own experience using the STAR structure. Add project notes to your profile to get a suggested example here.";
       const points = [
-        "**Situation (S)**: Black Friday peak traffic caused sudden Redis eviction of top catalog keys, triggering thousands of concurrent database fallbacks and DB connection exhaustion.",
-        "**Task (T)**: As the incident commander, I needed to stabilize the primary database, stop the cache stampede, and restore customer checkout SLA.",
-        "**Action (A)**: Implemented probabilistic early expiration (XFetch algorithm) in our application gateway and added distributed mutex locking (Redlock) so only 1 worker refreshed cold keys.",
-        "**Result (R)**: Stabilized DB CPU from 99% to 22% within 18 minutes. Subsequent load tests showed zero downtime at 3.5x regular peak throughput."
+        "**Situation (S)**: One or two sentences of context: team, system, stakes.",
+        "**Task (T)**: What you specifically were responsible for.",
+        "**Action (A)**: The concrete steps *you* took and why; this should be most of the answer.",
+        "**Result (R)**: Measurable outcome and what you learned or changed afterwards."
       ];
-      const snippet = `// STAR Takeaways:
-// 1. Quick triage & clear blameless incident communications.
-// 2. Resilience patterns: Circuit breaker, XFetch early cache refresh, Redlock.
-// 3. Post-mortem root cause analysis and automated synthetic monitoring.`;
       const followUps = [
-        "How did you coordinate cross-team communication during the live outage?",
-        "What safeguards did you put in place to prevent future cache stampedes?",
-        "What was the biggest lesson you learned from that incident?"
+        "What would you do differently next time?",
+        "How did you communicate with stakeholders during this?",
+        "What was the hardest trade-off you had to make?"
       ];
 
-      return this.formatAnswer(direct, points, snippet, followUps, lengthMode, modifier);
+      return this.formatAnswer(direct, points, undefined, followUps, lengthMode, modifier);
     }
 
     // 5. Idempotency & Reliable API Design (PRD §39)
@@ -355,45 +460,26 @@ end`;
       return this.formatAnswer(direct, points, snippet, followUps, lengthMode, modifier);
     }
 
-    // 6. Coding Mode (PRD Section 39: Approach, Algorithm, Complexity, Code, Edge Cases)
-    if (category === 'Coding' || sessionType === 'coding' || qLower.includes('algorithm') || qLower.includes('complexity') || qLower.includes('binary tree') || qLower.includes('linked list') || qLower.includes('function') || qLower.includes('dynamic programming')) {
-      const direct = `For "${questionText.replace(/\?$/, '')}", the optimal algorithmic approach achieves O(N) time complexity and O(1) auxiliary space using two-pointer / hash-map tracking.`;
+    // 6. Coding question: a problem-solving checklist (a real solution needs an AI provider)
+    if (category === 'Coding' || sessionType === 'coding' || /\b(algorithm|complexity|binary tree|linked list|dynamic programming|write a function|implement)\b/.test(qLower)) {
+      const direct = `Offline mode cannot write a solution for "${questionText.replace(/\?$/, '')}". Use this checklist to work through it out loud.`;
       const points = [
-        "**Approach (PRD §39)**: Use a sliding window or two-pointer scan to avoid redundant nested iterations, maintaining state in a fast lookup hash table.",
-        "**Algorithm**: 1. Initialize left and right pointers. 2. Expand right pointer to incorporate current element into frequency map. 3. While condition violated, contract left pointer. 4. Update max length / result.",
-        "**Complexity**: **Time Complexity**: O(N) single-pass traversal • **Space Complexity**: O(K) where K is character set size.",
-        "**Edge Cases**: Null or empty input, single-element collections, duplicate elements, and integer overflow boundary checks."
+        "**Clarify**: Restate the problem, confirm input size, constraints, and expected output with an example.",
+        "**Brute Force First**: State the simplest correct approach and its time/space complexity.",
+        "**Optimize**: Look for repeated work: hash maps, two pointers, sorting, sliding window, memoization.",
+        "**Edge Cases & Tests**: Empty input, single element, duplicates, very large values; walk through one test by hand."
       ];
-      const snippet = `// Optimal O(N) TypeScript Implementation
-export function solveProblem(input: string[] | number[]): number {
-  if (!input || input.length === 0) return 0;
-  
-  const seen = new Map<number, number>();
-  let maxResult = 0;
-  let left = 0;
-  
-  for (let right = 0; right < input.length; right++) {
-    const val = input[right] as number;
-    if (seen.has(val) && seen.get(val)! >= left) {
-      left = seen.get(val)! + 1; // Slide window past duplicate
-    }
-    seen.set(val, right);
-    maxResult = Math.max(maxResult, right - left + 1);
-  }
-  
-  return maxResult;
-}`;
       const followUps = [
-        "What are the space-time trade-offs if we cannot use extra memory O(1)?",
-        "How would you handle streaming data where total size does not fit into RAM?",
-        "What unit tests would you write for boundary and negative edge cases?"
+        "Can you improve the time or space complexity?",
+        "How would this change if the input did not fit in memory?",
+        "Which tests would you write for this function?"
       ];
 
-      return this.formatAnswer(direct, points, snippet, followUps, lengthMode, modifier);
+      return this.formatAnswer(direct, points, undefined, followUps, lengthMode, modifier);
     }
 
     // 7. Generic / Fallback Technical Question
-    const direct = `To address "${questionText.replace(/\?$/, '')}", the optimal engineering approach balances architectural clarity, modular decoupling, and observable reliability in production.`;
+    const direct = `No AI provider is configured, so there is no specific answer for "${questionText.replace(/\?$/, '')}". Structure your answer around the points below.`;
     const points = [
       `**Core Concept**: Leverage standard patterns and idiomatic conventions for ${category.toLowerCase()} architecture.`,
       "**Trade-off Analysis**: Balance time complexity vs space complexity, latency vs throughput, and consistency vs availability.",
@@ -452,10 +538,12 @@ export function solveProblem(input: string[] | number[]): number {
 
     if (followUps && followUps.length > 0) {
       fullMarkdown += `\n### Anticipated Follow-up Questions\n`;
-      followUps.forEach(f => {
-        fullMarkdown += `1. ${f}\n`;
+      followUps.forEach((f, i) => {
+        fullMarkdown += `${i + 1}. ${f}\n`;
       });
     }
+
+    fullMarkdown += `\n> Offline template. Set GROQ_API_KEY or GEMINI_API_KEY for answers specific to the question.\n`;
 
     return {
       directAnswer: finalDirect,
@@ -467,41 +555,85 @@ export function solveProblem(input: string[] | number[]): number {
   }
 
   /**
-   * Simulates realistic token-by-token streaming (40ms chunks) for sub-second first-token response
+   * Streams template text word-by-word so offline answers render like real ones.
    */
   private async simulateTokenStream(
     fullContent: string,
-    callbacks: AnswerStreamCallbacks,
-    initialAnswer: GeneratedAnswer,
-    startTime: number
+    emit: (token: string) => void,
+    signal?: AbortSignal
   ): Promise<void> {
     const tokens = fullContent.split(/(\s+)/);
-    let accumulated = '';
-    let isFirst = true;
-
-    for (let i = 0; i < tokens.length; i++) {
-      const token = tokens[i];
-      accumulated += token;
-
-      if (isFirst) {
-        initialAnswer.firstTokenLatencyMs = Date.now() - startTime;
-        isFirst = false;
-      }
-
-      callbacks.onToken(token, accumulated);
-
-      // Pace tokens between 15ms and 35ms for natural reading speed
+    for (const token of tokens) {
+      if (signal?.aborted) return;
+      emit(token);
       await new Promise(resolve => setTimeout(resolve, 20));
     }
+  }
 
-    initialAnswer.fullContent = accumulated;
-    initialAnswer.isComplete = true;
-    initialAnswer.totalLatencyMs = Date.now() - startTime;
-    callbacks.onComplete(initialAnswer);
+  private buildSystemPrompt(sessionType: SessionType, lengthMode: AnswerLengthMode, contextSummary: string, modifier: string | undefined): string {
+    return `You are SideBro AI, an expert assistant helping a candidate in a ${sessionType} interview.
+Candidate profile & context (the ONLY source for claims about the candidate's own experience):
+${contextSummary || 'No profile provided.'}
+
+Your task: give concise, accurate speaking points that directly answer the question.
+Answer length mode: ${lengthMode} (${lengthMode === 'quick' ? 'short, 2 punchy bullet points' : lengthMode === 'detailed' ? 'in-depth, low-level nuance, include code/config if relevant' : 'balanced, 3-4 bullet points'}).
+${modifier ? `Special request: Make it ${modifier}.` : ''}
+
+CRITICAL RULES:
+1. Always directly answer the specific question asked. Never output generic template answers.
+2. NEVER invent personal experience, employers, projects, or metrics. Only reference experience that appears in the profile above. If the question asks about personal experience and the profile has nothing relevant, give a STAR outline with placeholders and tell the candidate to use a real example.
+3. ONLY include a code block if the question asks for code, an algorithm, a data structure implementation, or programming syntax.
+4. Format cleanly using standard markdown headers:
+### Direct Answer
+[1-2 clear sentences giving the core insight directly]
+
+### Key Points
+• [Core mechanism or insight with **bold terms**]
+• [Trade-off or implementation detail]
+• [Production nuance, scalability, or edge case]
+
+### Code / Implementation Blueprint (ONLY if code was asked for)
+\`\`\`[language]
+// Working code
+\`\`\`
+
+### Anticipated Follow-up Questions
+1. [Realistic follow-up question]
+2. [Second realistic follow-up question]`;
+  }
+
+  private buildUserPrompt(questionText: string, recentTranscripts: { speaker: string; text: string }[]): string {
+    return `Recent conversation:
+${recentTranscripts.slice(-4).map(t => `${t.speaker}: ${t.text}`).join('\n')}
+
+Interviewer Question: "${questionText}"`;
   }
 
   /**
-   * Stream directly from Google Gemini API
+   * Reads a server-sent-events body line by line, buffering partial lines across chunks.
+   */
+  private async readSse(response: Response, onData: (data: string) => void): Promise<void> {
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error('No readable stream in provider response');
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('data:')) onData(trimmed.slice(5).trim());
+      }
+    }
+    const tail = buffer.trim();
+    if (tail.startsWith('data:')) onData(tail.slice(5).trim());
+  }
+
+  /**
+   * Stream from Google Gemini (SSE mode).
    */
   private async streamFromGemini(
     questionText: string,
@@ -510,105 +642,44 @@ export function solveProblem(input: string[] | number[]): number {
     contextSummary: string,
     recentTranscripts: { speaker: string; text: string }[],
     modifier: string | undefined,
-    callbacks: AnswerStreamCallbacks,
-    initialAnswer: GeneratedAnswer,
-    startTime: number
+    emit: (token: string) => void,
+    signal: AbortSignal
   ): Promise<void> {
-    const prompt = `
-You are SideBro AI, a world-class real-time AI conversation wingman helping a candidate in a ${sessionType} interview.
-The interviewer just asked: "${questionText}".
-
-Uploaded Candidate Context:
-${contextSummary || 'No extra documents provided.'}
-
-Recent Conversation:
-${recentTranscripts.slice(-4).map(t => `${t.speaker}: ${t.text}`).join('\n')}
-
-Requirement:
-Answer length mode: ${lengthMode}.
-${modifier ? `Special request: Make it ${modifier}.` : ''}
-
-Format your response cleanly:
-### Direct Answer
-[1-2 punchy sentences that give the core insight immediately]
-
-### Key Points
-• [Bullet 1 with **bold keywords**]
-• [Bullet 2 with **bold keywords**]
-• [Bullet 3 with **bold keywords**]
-
-### Code / Implementation Blueprint (Include when technical, coding, or architecture problem)
-\`\`\`typescript
-// Working, complete, production-grade code or snippet
-\`\`\`
-
-### Anticipated Follow-up Questions
-1. [Follow up 1]
-2. [Follow up 2]
-    `.trim();
-
-    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent?key=${this.geminiApiKey}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text: prompt }] }],
-      }),
-    });
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(this.geminiModel)}:streamGenerateContent?alt=sse`,
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': this.geminiApiKey as string,
+        },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: this.buildSystemPrompt(sessionType, lengthMode, contextSummary, modifier) }] },
+          contents: [{ role: 'user', parts: [{ text: this.buildUserPrompt(questionText, recentTranscripts) }] }],
+          generationConfig: { temperature: 0.3, maxOutputTokens: lengthMode === 'quick' ? 400 : 1100 },
+        }),
+        signal,
+      }
+    );
 
     if (!response.ok) {
       throw new Error(`Gemini API HTTP ${response.status}: ${await response.text()}`);
     }
 
-    const reader = response.body?.getReader();
-    if (!reader) throw new Error('No readable stream from Gemini API');
-
-    const decoder = new TextDecoder();
-    let accumulated = '';
-    let isFirst = true;
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      const chunk = decoder.decode(value, { stream: true });
-      // Parse SSE JSON
-      const lines = chunk.split('\n');
-      for (const line of lines) {
-        if (line.startsWith('data: ') || line.trim().startsWith('{')) {
-          const jsonStr = line.startsWith('data: ') ? line.slice(6) : line;
-          try {
-            const data = JSON.parse(jsonStr);
-            const candidate = data.candidates?.[0];
-            const textPart = candidate?.content?.parts?.[0]?.text;
-            if (textPart) {
-              if (isFirst) {
-                initialAnswer.firstTokenLatencyMs = Date.now() - startTime;
-                isFirst = false;
-              }
-              accumulated += textPart;
-              callbacks.onToken(textPart, accumulated);
-            }
-          } catch {
-            // Partial JSON buffer, proceed
-          }
+    await this.readSse(response, data => {
+      try {
+        const parts = JSON.parse(data).candidates?.[0]?.content?.parts || [];
+        for (const part of parts) {
+          if (part.text && !part.thought) emit(part.text);
         }
+      } catch {
+        // ignore keep-alive or malformed lines
       }
-    }
-
-    const parsed = this.parseStructuredSections(accumulated);
-    if (parsed.directAnswer) initialAnswer.directAnswer = parsed.directAnswer;
-    if (parsed.keyPoints && parsed.keyPoints.length > 0) initialAnswer.keyPoints = parsed.keyPoints;
-    initialAnswer.exampleOrSnippet = parsed.exampleOrSnippet || undefined;
-    if (parsed.followUpQuestions && parsed.followUpQuestions.length > 0) initialAnswer.followUpQuestions = parsed.followUpQuestions;
-
-    initialAnswer.fullContent = accumulated;
-    initialAnswer.isComplete = true;
-    initialAnswer.totalLatencyMs = Date.now() - startTime;
-    callbacks.onComplete(initialAnswer);
+    });
   }
 
   /**
-   * Stream directly from Groq using qwen/qwen3.8-27b (ultra-fast sub-second LLM)
+   * Stream from Groq's OpenAI-compatible chat completions API.
    */
   private async streamFromGroq(
     questionText: string,
@@ -617,46 +688,9 @@ Format your response cleanly:
     contextSummary: string,
     recentTranscripts: { speaker: string; text: string }[],
     modifier: string | undefined,
-    callbacks: AnswerStreamCallbacks,
-    initialAnswer: GeneratedAnswer,
-    startTime: number
+    emit: (token: string) => void,
+    signal: AbortSignal
   ): Promise<void> {
-    const systemPrompt = `You are SideBro AI, a world-class real-time AI conversation wingman and expert copilot helping a candidate in a ${sessionType} interview.
-Candidate Profile & Context:
-${contextSummary || 'Senior Software Engineer with deep fullstack, mobile, and distributed systems experience.'}
-
-Your task: Provide immediate, high-impact, authentic speaking points for the candidate.
-Answer length mode: ${lengthMode} (${lengthMode === 'quick' ? 'short, 2 punchy bullet points' : lengthMode === 'detailed' ? 'in-depth, low-level nuance, include code/config if relevant' : 'balanced, 3-4 bullet points'}).
-${modifier ? `Special request: Make it ${modifier}.` : ''}
-
-CRITICAL RULES:
-1. Always directly answer the specific question asked. Never output generic template answers.
-2. ONLY include a Code block if the question explicitly asks for code, writing an algorithm, data structure implementation, or programming syntax.
-3. If the question is conceptual, behavioral, architectural, or conversational (e.g. system design trade-offs, team experience, or conceptual explanations like Node.js event loop), DO NOT include any code block. Only provide Direct Answer, Key Points, and Follow-up Questions.
-4. Format cleanly using standard markdown headers:
-### Direct Answer
-[1-2 clear, punchy sentences giving the core insight directly]
-
-### Key Points
-• [Core architectural insight, mechanism, or metric with **bold terms**]
-• [Trade-off, operational experience, or implementation detail]
-• [Production nuance, scalability, or edge-case handling]
-
-### Code / Implementation Blueprint (ONLY if code/algorithm implementation was asked for)
-\`\`\`[language]
-// Working, production-grade code or implementation snippet
-\`\`\`
-
-### Anticipated Follow-up Questions
-1. [Realistic follow-up question the interviewer might ask next]
-2. [Second realistic follow-up question]`;
-
-    const userContent = `Recent conversation:
-${recentTranscripts.slice(-4).map(t => `${t.speaker}: ${t.text}`).join('\n')}
-
-Interviewer Question: "${questionText}"
-Provide the winning answer now:`;
-
     const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -664,68 +698,33 @@ Provide the winning answer now:`;
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: 'qwen/qwen3.8-27b',
+        model: this.groqModel,
         messages: [
-          { role: 'system', content: systemPrompt },
-          { role: 'user', content: userContent },
+          { role: 'system', content: this.buildSystemPrompt(sessionType, lengthMode, contextSummary, modifier) },
+          { role: 'user', content: this.buildUserPrompt(questionText, recentTranscripts) },
         ],
         temperature: 0.3,
         max_tokens: lengthMode === 'quick' ? 400 : 1100,
         stream: true,
       }),
+      signal,
     });
 
     if (!response.ok) {
       throw new Error(`Groq API HTTP ${response.status}: ${await response.text()}`);
     }
 
-    const reader = response.body?.getReader();
-    if (!reader) throw new Error('No readable stream from Groq API');
-
-    const decoder = new TextDecoder();
-    let accumulated = '';
-    let isFirst = true;
-    let buffer = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || trimmed === 'data: [DONE]') continue;
-        if (trimmed.startsWith('data: ')) {
-          try {
-            const data = JSON.parse(trimmed.slice(6));
-            const delta = data.choices?.[0]?.delta?.content;
-            if (delta) {
-              if (isFirst) {
-                initialAnswer.firstTokenLatencyMs = Date.now() - startTime;
-                isFirst = false;
-              }
-              accumulated += delta;
-              callbacks.onToken(delta, accumulated);
-            }
-          } catch {}
-        }
+    const think = new ThinkFilter();
+    await this.readSse(response, data => {
+      if (data === '[DONE]') return;
+      try {
+        const delta = JSON.parse(data).choices?.[0]?.delta?.content;
+        if (delta) emit(think.push(delta));
+      } catch {
+        // ignore malformed lines
       }
-    }
-
-    // Extract structured sections from accumulated LLM response
-    const parsed = this.parseStructuredSections(accumulated);
-    if (parsed.directAnswer) initialAnswer.directAnswer = parsed.directAnswer;
-    if (parsed.keyPoints && parsed.keyPoints.length > 0) initialAnswer.keyPoints = parsed.keyPoints;
-    initialAnswer.exampleOrSnippet = parsed.exampleOrSnippet || undefined;
-    if (parsed.followUpQuestions && parsed.followUpQuestions.length > 0) initialAnswer.followUpQuestions = parsed.followUpQuestions;
-
-    initialAnswer.fullContent = accumulated;
-    initialAnswer.isComplete = true;
-    initialAnswer.totalLatencyMs = Date.now() - startTime;
-    callbacks.onComplete(initialAnswer);
+    });
+    emit(think.flush());
   }
 
   /**

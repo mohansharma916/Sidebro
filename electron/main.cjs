@@ -20,9 +20,11 @@ function createWindow() {
     },
   });
 
-  // Load either Vite dev server (IPv4 127.0.0.1 to avoid macOS IPv6 ::1 ECONNREFUSED) or production build
-  const devUrl = 'http://127.0.0.1:5173?mode=desktop';
-  const prodPath = path.join(__dirname, '../client/dist/index.html');
+  // Load either the Vite dev server or the built client served by the backend over http
+  // (IPv4 127.0.0.1 avoids macOS IPv6 ::1 ECONNREFUSED). Loading via file:// is avoided because
+  // every relative /api request would fail there.
+  const devUrl = 'http://127.0.0.1:5173/?mode=desktop';
+  const serverUrl = `http://127.0.0.1:${process.env.PORT || 3001}/?mode=desktop`;
 
   // Forward renderer console logs to terminal for easy debugging
   mainWindow.webContents.on('console-message', (event, level, message, line, sourceId) => {
@@ -30,33 +32,19 @@ function createWindow() {
     console.log(`[Electron Renderer][${levelStr}] ${message} (${sourceId}:${line})`);
   });
 
-  mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL) => {
-    console.warn(`[Electron] Failed to load ${validatedURL}: ${errorDescription} (${errorCode})`);
-    // Fall back to production build if available
-    try {
-      if (require('fs').existsSync(prodPath)) {
-        console.log('[Electron] Falling back to local production build at:', prodPath);
-        mainWindow.loadFile(prodPath, { query: { mode: 'desktop' } });
-      }
-    } catch (e) {
-      console.error('[Electron] Fallback error:', e);
-    }
-  });
-
-  // Attempt loading dev URL
-  mainWindow.loadURL(devUrl).catch(() => {
-    // If dev server isn't running, try loading local build or retry
-    try {
-      if (require('fs').existsSync(prodPath)) {
-        console.log('[Electron] Vite dev server not ready, loading built bundle:', prodPath);
-        mainWindow.loadFile(prodPath, { query: { mode: 'desktop' } });
-      } else {
-        setTimeout(() => mainWindow.loadURL(devUrl).catch(() => {}), 2000);
-      }
-    } catch {
-      setTimeout(() => mainWindow.loadURL(devUrl).catch(() => {}), 2000);
-    }
-  });
+  // Try the dev server first, then the backend-served build; keep retrying while either starts up.
+  const candidates = [devUrl, serverUrl];
+  let attempt = 0;
+  const loadNext = () => {
+    if (!mainWindow) return;
+    const url = candidates[attempt % candidates.length];
+    attempt++;
+    mainWindow.loadURL(url).catch(err => {
+      console.warn(`[Electron] Could not load ${url}: ${err.message}`);
+      setTimeout(loadNext, attempt < candidates.length ? 0 : 2000);
+    });
+  };
+  loadNext();
 
   // Allow F12 or Cmd+Option+I to toggle DevTools
   mainWindow.webContents.on('before-input-event', (event, input) => {
@@ -74,13 +62,24 @@ function createWindow() {
 app.whenReady().then(async () => {
   // Explicitly allow microphone and screen media permissions for the web renderer
   if (session && session.defaultSession) {
+    // Only grant permissions to the app's own pages (dev server or local backend), never to other origins.
+    const isAppOrigin = (origin) => {
+      try {
+        const { hostname, port } = new URL(origin);
+        return (hostname === '127.0.0.1' || hostname === 'localhost') &&
+          (port === '5173' || port === String(process.env.PORT || 3001));
+      } catch {
+        return false;
+      }
+    };
+
     session.defaultSession.setPermissionRequestHandler((webContents, permission, callback) => {
-      const allowed = ['media', 'mediaKeySystem', 'screen', 'notifications', 'accessibility-events'];
-      callback(allowed.includes(permission));
+      const allowed = ['media', 'mediaKeySystem', 'screen', 'clipboard-sanitized-write'];
+      callback(isAppOrigin(webContents.getURL()) && allowed.includes(permission));
     });
 
-    session.defaultSession.setPermissionCheckHandler((webContents, permission) => {
-      return true;
+    session.defaultSession.setPermissionCheckHandler((webContents, permission, requestingOrigin) => {
+      return isAppOrigin(requestingOrigin) && ['media', 'mediaKeySystem', 'screen', 'clipboard-sanitized-write'].includes(permission);
     });
 
     // Support getDisplayMedia for system audio loopback capture on macOS / Windows

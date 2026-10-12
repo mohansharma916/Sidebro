@@ -1,4 +1,7 @@
 import { ContextProfile } from './types.js';
+import { StorageEngine } from './storageEngine.js';
+
+export const DEMO_PROFILE_ID = 'demo-profile';
 
 export interface DocumentChunk {
   id: string;
@@ -11,15 +14,23 @@ export class ContextEngine {
   private profiles: Map<string, ContextProfile> = new Map();
   private profileChunks: Map<string, DocumentChunk[]> = new Map();
 
-  constructor() {
-    // Seed default sample profile for instant demonstration
-    this.seedDefaultProfile();
+  constructor(private readonly storage?: StorageEngine) {
+    const persisted = storage?.getAllProfiles() ?? [];
+    for (const profile of persisted) {
+      this.profiles.set(profile.id, profile);
+      this.processAndChunkProfile(profile);
+    }
+    // Seed a clearly-labelled sample profile so the simulator has something to ground on.
+    // It is never used unless the user explicitly selects it.
+    if (persisted.length === 0) {
+      this.seedDemoProfile();
+    }
   }
 
-  private seedDefaultProfile() {
+  private seedDemoProfile() {
     const defaultProfile: ContextProfile = {
-      id: 'default-profile',
-      name: 'Senior React Native & Fullstack Lead',
+      id: DEMO_PROFILE_ID,
+      name: 'DEMO — Sample profile (not your data)',
       role: 'Senior Staff Software Engineer',
       experience: '6 Years',
       preferredLanguage: 'TypeScript',
@@ -64,6 +75,7 @@ Key Project Accomplishments:
   public saveProfile(profile: ContextProfile): void {
     this.profiles.set(profile.id, profile);
     this.processAndChunkProfile(profile);
+    this.storage?.saveProfile(profile);
   }
 
   public getProfile(id: string): ContextProfile | undefined {
@@ -76,6 +88,7 @@ Key Project Accomplishments:
 
   public deleteProfile(id: string): boolean {
     this.profileChunks.delete(id);
+    this.storage?.deleteProfile(id);
     return this.profiles.delete(id);
   }
 
@@ -134,15 +147,20 @@ Key Project Accomplishments:
    * Retrieves top relevant chunks for a question using TF-IDF style keyword relevance
    */
   public retrieveContext(
-    profileId: string | undefined,
+    profile: ContextProfile | undefined,
     questionText: string,
     topK = 3
   ): { chunk: DocumentChunk; score: number }[] {
-    if (!profileId) {
-      profileId = 'default-profile';
+    // No profile selected means no personal context: never fall back to sample data.
+    if (!profile?.id) return [];
+
+    // The session carries its own copy of the profile, so it still works if the
+    // profile was edited or deleted after the session started.
+    if (!this.profileChunks.has(profile.id)) {
+      this.processAndChunkProfile(profile);
     }
 
-    const chunks = this.profileChunks.get(profileId);
+    const chunks = this.profileChunks.get(profile.id);
     if (!chunks || chunks.length === 0) return [];
 
     const questionKeywords = this.extractKeywords(questionText);

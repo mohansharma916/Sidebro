@@ -29,9 +29,9 @@ PRIMARY LAPTOP (macOS / Windows)
 NESTJS REAL-TIME BACKEND (Port 3001)
    ├── SessionModule: WebSocket Gateway (/ws) + REST Controllers (/api/sessions)
    ├── StorageModule: SQLite Persistent Engine (node:sqlite DatabaseSync)
-   ├── AiModule: Ultra-low latency streaming (Groq Llama 3.3/Qwen 2.5, OpenAI, Ollama)
+   ├── AiModule: Streaming answers via Groq (default qwen/qwen3.8-27b) or Gemini, offline templates otherwise
    ├── ContextModule: Document Chunking & Keyword RAG Engine (Resume, JD, Notes)
-   ├── SpeechModule: Dual-channel STT with Whisper local/cloud fallback
+   ├── SpeechModule: Dual-channel STT via Groq Whisper, falling back to OpenAI Whisper
    ├── AnalyticsModule: Debrief summaries, coding solutions log, Markdown export
    └── NetworkModule: LAN auto-discovery & dynamic QR code pairing
             │
@@ -54,7 +54,7 @@ SIDEBRO SECOND SCREEN (Phone / Tablet / Browser)
    - Your primary laptop remains clean, uncluttered, and 100% free of suspicious windows during screen-sharing.
    - Your phone or tablet propped up on your desk becomes your discreet, responsive copilot.
 2. **Instant QR Code & 6-Character Fast Pairing**:
-   - Generates an encrypted 6-character session code (e.g. `A7X9KP`) and a crisp QR code.
+   - Generates a random 6-character pairing code (e.g. `A7X9KP`) and a QR code. Pairing returns a per-session access token that every later request must present.
    - Scan directly with your mobile camera or in-app camera scanner to join in under 1 second.
 3. **Dual-Channel Speaker Separation**:
    - `Microphone Audio` ➔ Tagged as `YOU` (Candidate).
@@ -63,12 +63,13 @@ SIDEBRO SECOND SCREEN (Phone / Tablet / Browser)
    - Detects interrogatives ("How does Fiber work?", "Can you explain JSI?", "Tell me about a time...") and filters conversational fillers ("okay?", "right?").
    - Buffers fragmented speech so natural pauses don't trigger premature or duplicate answers.
 5. **Context Grounding & RAG**:
-   - Injects your authentic Resume, Job Description, and Project Notes (e.g., performance optimizations, outage incidents) into the AI prompt so answers cite your real achievements.
+   - Injects the Resume, Job Description, and Project Notes of the profile you select into the AI prompt. With no profile selected, no personal context is used and the AI is instructed never to invent experience.
+   - A clearly-labelled **DEMO** profile is seeded for the simulator; it is never used unless you pick it.
 6. **NestJS Modular Architecture**:
    - Built on `@nestjs/core`, `@nestjs/common`, and `@nestjs/platform-ws`.
    - Clear separation of concerns into dedicated modules: `SessionModule`, `AiModule`, `ContextModule`, `StorageModule`, `SpeechModule`, `AnalyticsModule`, and `NetworkModule`.
 7. **SQLite Historical Persistence**:
-   - Automatically records all sessions, transcripts, detected questions, streaming answers, coding snippets, and notes into `server/data/copilot.sqlite`.
+   - Automatically records all sessions, transcripts, detected questions, streaming answers, coding snippets, notes, and context profiles into `server/data/copilot.sqlite` (override with `DATA_DIR`).
    - Retains analytics across server restarts for post-session debriefs and performance audits.
 8. **Interactive Interview Simulator**:
    - Built-in test runner with pre-configured scenarios (Senior React Native Lead, Distributed Rate Limiter, STAR Incident Response) and 1-click test buttons to test the entire loop without needing a live call.
@@ -89,14 +90,15 @@ npm install
 ```
 
 ### 3. Environment Configuration (Optional)
-Create a `.env` file in the project root:
+Create a `.env` file in the project root (see `.env.example` for all options):
 ```env
 PORT=3001
-GROQ_API_KEY=gsk_...           # For sub-300ms ultra-fast streaming (Recommended)
-OPENAI_API_KEY=sk-...          # Optional alternative
-OLLAMA_HOST=http://localhost:11434 # Optional local model
+GROQ_API_KEY=gsk_...           # Answers + Whisper speech-to-text (recommended)
+GEMINI_API_KEY=...             # Optional answer provider (fallback after Groq)
+OPENAI_API_KEY=sk-...          # Optional Whisper speech-to-text fallback
+ADMIN_TOKEN=...                # Optional: enables cross-session admin endpoints
 ```
-*(If no API key is provided, SideBro automatically falls back to its built-in Domain Expert Knowledge Engine with sub-second token streaming.)*
+*(With no LLM key, SideBro streams clearly-labelled offline templates: general explanations for a few known topics and answer structures otherwise. It never makes up personal experience.)*
 
 ### 4. Run Development Servers
 Starts both the NestJS backend (`port 3001`) and the Vite frontend (`port 5173`):
@@ -111,6 +113,8 @@ npm run dev
 ```bash
 npm run electron
 ```
+Electron loads the Vite dev server, or the built client served by the backend at `http://127.0.0.1:3001` (`npm run build && npm start`).
+System-audio loopback capture is reliable on Windows; on macOS check that the captured stream actually contains an audio track.
 
 ### 6. Build for Production
 ```bash
@@ -143,13 +147,24 @@ npm run docker:down
 
 ---
 
-## 🧪 Automated End-to-End Testing
-
-Run the included automated E2E test suite to verify session creation, dual-device pairing, audio streaming, automatic question detection, sub-second token streaming, and post-session analytics:
+## 🧪 Testing
 
 ```bash
-npx tsx server/test-e2e.ts
+npm test        # builds the server and runs unit, storage and in-process API/WebSocket tests (node:test)
+npm run e2e     # demo walkthrough against a running server on :3001 (npm start in another terminal)
 ```
+
+CI (`.github/workflows/ci.yml`) runs the build (including type-checking) and `npm test` on every push.
+
+---
+
+## 🔐 Security Model
+
+- Every `/api/sessions/:id/*` route and every WebSocket join requires the session token (`x-session-token` header, or `?token=` on download links). A socket only receives events for a session after a validated `session.join`.
+- Pairing codes expire after 12 hours and stop working once a session ends.
+- CORS and WebSocket origins are limited to localhost and private LAN addresses (add more with `CORS_ORIGINS`).
+- Cross-session endpoints (`GET /api/sessions`, `/api/analytics/overview|search|coding-solutions`) are disabled unless `ADMIN_TOKEN` is set.
+- `/api/profiles` has no authentication: anyone on your network can read or change profiles. Run the server on a network you trust.
 
 ---
 
@@ -167,13 +182,15 @@ INTERVIEW_HELP/
 │   │   ├── app.module.ts      # Root NestJS application module
 │   │   ├── session/           # Session management, controller, gateway, simulation
 │   │   ├── storage/           # SQLite persistence module
-│   │   ├── ai/                # Groq / OpenAI / Ollama streaming engine
+│   │   ├── ai/                # Groq / Gemini streaming engine (offline templates fallback)
+│   │   ├── common/            # Auth guards, validation, rate limiting, origin checks
 │   │   ├── context/           # RAG profile & document chunking engine
 │   │   ├── speech/            # Whisper STT status and audio ingestion
 │   │   ├── analytics/         # Session debriefs & coding solutions log
 │   │   └── network/           # Health checks and LAN IP resolution
 │   ├── data/                  # SQLite storage folder (copilot.sqlite)
-│   └── test-e2e.ts            # Automated end-to-end integration test
+│   ├── test/                  # node:test suites (npm test)
+│   └── test-e2e.ts            # Demo walkthrough against a running server
 ├── client/                    # Vite + React + TypeScript + Vanilla CSS
 │   ├── Dockerfile             # Nginx production container
 │   ├── nginx.conf             # Reverse proxy config for API and WebSockets
