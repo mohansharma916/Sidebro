@@ -276,7 +276,10 @@ export class SessionGateway
       sessionId: transcript.sessionId,
       payload: transcript,
     });
-    this.questionDetectorService.ingestTranscript(transcript);
+    const session = this.sessionService.getSession(transcript.sessionId);
+    // When system audio is not active, mic is the only audio source, so evaluate candidate speech for questions
+    const allowCandidate = !session?.systemAudioActive;
+    this.questionDetectorService.ingestTranscript(transcript, allowCandidate);
     return true;
   }
 

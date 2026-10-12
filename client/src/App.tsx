@@ -319,6 +319,8 @@ export function App() {
   // Audio Capture Hook with both Web Speech API and MediaRecorder chunk streaming
   const {
     state: audioState,
+    micRole,
+    setMicRole,
     startMicrophone,
     stopMicrophone,
     startSystemAudio,
@@ -335,7 +337,8 @@ export function App() {
       if (session && session.status === 'active') {
         handleAudioSlice(speaker, audioBase64, mimeType);
       }
-    }
+    },
+    'OTHER'
   );
 
   // Live 1-second duration clock while session is active
@@ -490,9 +493,30 @@ export function App() {
     }
   };
 
-  const handleManualAsk = (questionText: string) => {
-    if (session) {
-      send('manual.ask', { questionText }, session.id);
+  const ensureActiveSessionForStealth = useCallback(async () => {
+    let cur = sessionRef.current;
+    if (!cur || cur.status !== 'active') {
+      await handleCreateSession('technical', 'Live Copilot Session', undefined, 'senior');
+      cur = sessionRef.current;
+    }
+    if (!audioState.isMicActive) {
+      try {
+        await startMicrophone();
+      } catch (e) {
+        console.warn('Auto start mic notice:', e);
+      }
+    }
+  }, [audioState.isMicActive, startMicrophone]);
+
+  const handleManualAsk = async (questionText: string) => {
+    let cur = sessionRef.current;
+    if (!cur || cur.status !== 'active') {
+      await handleCreateSession('technical', 'Live Copilot Session', undefined, 'senior');
+      cur = sessionRef.current;
+    }
+    if (cur) {
+      send('manual.ask', { questionText }, cur.id);
+      postJson(`/api/sessions/${cur.id}/ask`, { questionText }).catch(() => {});
     }
   };
 
@@ -517,6 +541,7 @@ export function App() {
       }
       setAppMode('desktop');
     } else {
+      void ensureActiveSessionForStealth();
       try {
         if (window.electronAPI?.toggleFloatingMode) {
           await window.electronAPI.toggleFloatingMode(true);
@@ -551,6 +576,7 @@ export function App() {
         micVolume={audioState.micVolume}
         systemVolume={audioState.systemVolume}
         vadActive={audioState.vadActive}
+        micRole={micRole}
         transcripts={transcripts}
         questions={questions}
         currentQuestion={currentQuestion}
@@ -558,6 +584,9 @@ export function App() {
         isProtected={isStealthProtected}
         onToggleProtection={handleToggleStealthProtection}
         onExitFloatingMode={handleToggleFloatingMode}
+        onToggleMicrophone={() => (audioState.isMicActive ? stopMicrophone() : startMicrophone())}
+        onToggleMicRole={() => setMicRole(micRole === 'OTHER' ? 'YOU' : 'OTHER')}
+        onEnsureSession={ensureActiveSessionForStealth}
         onLengthModeChange={handleLengthModeChange}
         onTriggerModifier={handleTriggerModifier}
         onManualAsk={handleManualAsk}

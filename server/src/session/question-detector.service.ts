@@ -19,8 +19,8 @@ export class QuestionDetectorService {
     this.handler = handler;
   }
 
-  public ingestTranscript(transcript: TranscriptItem): void {
-    this.detector.ingestTranscript(transcript);
+  public ingestTranscript(transcript: TranscriptItem, allowCandidate: boolean = false): void {
+    this.detector.ingestTranscript(transcript, allowCandidate);
   }
 
   public clearSession(sessionId: string): void {

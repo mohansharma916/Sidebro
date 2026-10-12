@@ -221,8 +221,18 @@ class ContinuousSegmentRecorder {
 
 export function useAudioCapture(
   onTranscriptChunk?: (speaker: 'YOU' | 'OTHER', text: string, isFinal: boolean) => void,
-  onAudioSlice?: (speaker: 'YOU' | 'OTHER', audioBase64: string, mimeType: string) => void
+  onAudioSlice?: (speaker: 'YOU' | 'OTHER', audioBase64: string, mimeType: string) => void,
+  initialMicRole: 'OTHER' | 'YOU' = 'OTHER'
 ) {
+  const [micRole, setMicRoleState] = useState<'OTHER' | 'YOU'>(initialMicRole);
+  const micRoleRef = useRef<'OTHER' | 'YOU'>(initialMicRole);
+  micRoleRef.current = micRole;
+
+  const setMicRole = useCallback((role: 'OTHER' | 'YOU') => {
+    micRoleRef.current = role;
+    setMicRoleState(role);
+  }, []);
+
   const [state, setState] = useState<AudioCaptureState>({
     isMicActive: false,
     isSystemAudioActive: false,
@@ -304,7 +314,7 @@ export function useAudioCapture(
       // 2. Start Continuous Segment Audio Slicer for cloud transcription
       const rec = new ContinuousSegmentRecorder(
         stream,
-        'YOU',
+        micRoleRef.current,
         () => micVolumeRef.current,
         (speaker, base64, mimeType) => {
           // If Web Speech API is already transcribing the candidate locally, suppress duplicate cloud calls
@@ -456,7 +466,7 @@ export function useAudioCapture(
           const transcript = item[0].transcript;
           const isFinal = item.isFinal;
           if (transcript.trim() && onTranscriptRef.current) {
-            onTranscriptRef.current('YOU', transcript.trim(), isFinal);
+            onTranscriptRef.current(micRoleRef.current, transcript.trim(), isFinal);
           }
         }
       };
@@ -578,6 +588,8 @@ export function useAudioCapture(
 
   return {
     state,
+    micRole,
+    setMicRole,
     startMicrophone,
     stopMicrophone,
     startSystemAudio,

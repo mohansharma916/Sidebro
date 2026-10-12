@@ -20,10 +20,11 @@ export class QuestionDetector {
   /**
    * Ingests a new transcript chunk and processes question buffering
    */
-  public ingestTranscript(transcript: TranscriptItem): void {
-    // Only the interviewer's (OTHER) speech can trigger answers; the candidate's own speech never does.
-    // When the candidate starts talking, flush whatever the interviewer said so far.
-    if (transcript.speaker !== 'OTHER') {
+  public ingestTranscript(transcript: TranscriptItem, allowCandidate: boolean = false): void {
+    // Only the interviewer's (OTHER) speech triggers answers in dual-channel mode.
+    // When allowCandidate is true (single-mic mode, testing, or system audio not connected),
+    // speech from the microphone is also evaluated for interview questions.
+    if (transcript.speaker !== 'OTHER' && !allowCandidate) {
       const pending = this.buffers.get(transcript.sessionId);
       if (pending && pending.chunks.length > 0) {
         if (pending.timer) clearTimeout(pending.timer);
