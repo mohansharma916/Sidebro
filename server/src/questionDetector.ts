@@ -255,18 +255,36 @@ export class QuestionDetector {
       lower.includes('jsi') ||
       lower.includes('bridge') ||
       lower.includes('turbomodules') ||
+      lower.includes('next') ||
+      lower.includes('vue') ||
+      lower.includes('angular') ||
       lower.includes('concurrency') ||
       lower.includes('memory') ||
       lower.includes('garbage collection') ||
       lower.includes('database') ||
       lower.includes('sql') ||
       lower.includes('nosql') ||
+      lower.includes('postgres') ||
+      lower.includes('mongo') ||
       lower.includes('index') ||
       lower.includes('kafka') ||
       lower.includes('redis') ||
       lower.includes('docker') ||
       lower.includes('kubernetes') ||
+      lower.includes('k8s') ||
+      lower.includes('aws') ||
+      lower.includes('cloud') ||
+      lower.includes('terraform') ||
+      lower.includes('lambda') ||
+      lower.includes('ci/cd') ||
+      lower.includes('nginx') ||
+      lower.includes('graphql') ||
+      lower.includes('grpc') ||
+      lower.includes('websocket') ||
+      lower.includes('oauth') ||
+      lower.includes('jwt') ||
       lower.includes('typescript') ||
+      lower.includes('javascript') ||
       lower.includes('lifecycle') ||
       lower.includes('hook') ||
       lower.includes('virtual dom') ||
