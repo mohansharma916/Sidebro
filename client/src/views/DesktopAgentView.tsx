@@ -17,6 +17,7 @@ import {
   Send,
   Zap,
   Radio,
+  ShieldCheck,
 } from 'lucide-react';
 import {
   ContextProfile,
@@ -55,6 +56,7 @@ interface DesktopAgentViewProps {
   onResumeSession: () => void;
   onEndSession: () => void;
   onSimulateSpeech: (speaker: 'OTHER' | 'YOU', text: string) => void;
+  onLaunchFloatingMode?: () => void;
 }
 
 const DEMO_PROFILE_ID = 'demo-profile';
@@ -81,6 +83,7 @@ export const DesktopAgentView: React.FC<DesktopAgentViewProps> = ({
   onResumeSession,
   onEndSession,
   onSimulateSpeech,
+  onLaunchFloatingMode,
 }) => {
   const [sessionType, setSessionType] = useState<SessionType>('technical');
   const [sessionTitle, setSessionTitle] = useState('Senior React Native Interview');
@@ -381,7 +384,16 @@ export const DesktopAgentView: React.FC<DesktopAgentViewProps> = ({
             </p>
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+            {onLaunchFloatingMode && (
+              <button
+                onClick={onLaunchFloatingMode}
+                className="btn btn-stealth btn-sm"
+                title="Open Parakeet AI-style floating overlay. Pinned on top & invisible to Google Meet, Zoom, Teams screen shares."
+              >
+                <ShieldCheck size={14} /> Stealth Floating Window
+              </button>
+            )}
             <button
               onClick={() => setShowQrModal(!showQrModal)}
               className="btn btn-secondary btn-sm"

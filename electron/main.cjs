@@ -2,13 +2,16 @@ const { app, BrowserWindow, ipcMain, systemPreferences, session, desktopCapturer
 const path = require('path');
 
 let mainWindow = null;
+let isFloatingMode = false;
+let savedBounds = null;
+let isContentProtected = true;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 960,
     height: 720,
-    minWidth: 480,
-    minHeight: 520,
+    minWidth: 360,
+    minHeight: 380,
     title: 'SideBro AI — Desktop Capture Agent',
     titleBarStyle: 'hiddenInset',
     backgroundColor: '#0a0d14',
@@ -19,6 +22,15 @@ function createWindow() {
       sandbox: true,
     },
   });
+
+  // Protect window from being captured by Google Meet, Zoom, MS Teams, QuickTime, OBS
+  try {
+    mainWindow.setContentProtection(true);
+    isContentProtected = true;
+    console.log('[Electron] Stealth protection active: window is invisible to Google Meet, Zoom, and Teams.');
+  } catch (err) {
+    console.warn('[Electron] setContentProtection failed:', err);
+  }
 
   // Load either the Vite dev server or the built client served by the backend over http
   // (IPv4 127.0.0.1 avoids macOS IPv6 ::1 ECONNREFUSED). Loading via file:// is avoided because
@@ -32,16 +44,96 @@ function createWindow() {
     console.log(`[Electron Renderer][${levelStr}] ${message} (${sourceId}:${line})`);
   });
 
+  // Waiting screen HTML shown if the dev/backend servers are not yet running
+  const waitingHtml = `data:text/html;charset=utf-8,${encodeURIComponent(`
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <title>SideBro AI — Connecting...</title>
+      <style>
+        body {
+          margin: 0;
+          background: #080b11;
+          color: #f3f4f6;
+          font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          height: 100vh;
+          user-select: none;
+          -webkit-app-region: drag;
+        }
+        .container {
+          text-align: center;
+          max-width: 440px;
+          padding: 32px;
+          background: rgba(255, 255, 255, 0.03);
+          border: 1px solid rgba(255, 255, 255, 0.08);
+          border-radius: 16px;
+          backdrop-filter: blur(12px);
+          -webkit-app-region: no-drag;
+        }
+        .spinner {
+          width: 36px;
+          height: 36px;
+          border: 3px solid rgba(99, 102, 241, 0.2);
+          border-top-color: #6366f1;
+          border-radius: 50%;
+          animation: spin 1s linear infinite;
+          margin: 0 auto 18px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        h1 { font-size: 18px; margin: 0 0 10px; font-weight: 600; color: #fff; }
+        p { font-size: 13px; line-height: 1.5; color: #9ca3af; margin: 0 0 14px; }
+        code {
+          background: #111827;
+          color: #10b981;
+          padding: 6px 12px;
+          border-radius: 6px;
+          font-size: 13px;
+          font-family: monospace;
+          border: 1px solid #1f2937;
+          display: inline-block;
+          font-weight: 600;
+        }
+        .status {
+          font-size: 11px;
+          color: #6b7280;
+          margin-top: 16px;
+        }
+      </style>
+    </head>
+    <body>
+      <div class="container">
+        <div class="spinner"></div>
+        <h1>Connecting to SideBro AI...</h1>
+        <p>The desktop app requires the SideBro backend and client dev server to be running.</p>
+        <p>In your terminal, start them with:</p>
+        <code>npm run dev</code>
+        <div class="status">Checking http://127.0.0.1:5173 and http://127.0.0.1:${process.env.PORT || 3001}...</div>
+      </div>
+    </body>
+    </html>
+  `)}`;
+
   // Try the dev server first, then the backend-served build; keep retrying while either starts up.
   const candidates = [devUrl, serverUrl];
   let attempt = 0;
+  let shownWaitingScreen = false;
   const loadNext = () => {
     if (!mainWindow) return;
     const url = candidates[attempt % candidates.length];
     attempt++;
-    mainWindow.loadURL(url).catch(err => {
+    mainWindow.loadURL(url).then(() => {
+      console.log(`[Electron] Successfully loaded ${url}`);
+    }).catch(err => {
       console.warn(`[Electron] Could not load ${url}: ${err.message}`);
-      setTimeout(loadNext, attempt < candidates.length ? 0 : 2000);
+      if (!shownWaitingScreen && mainWindow) {
+        shownWaitingScreen = true;
+        mainWindow.loadURL(waitingHtml).catch(() => {});
+      }
+      setTimeout(loadNext, 1500);
     });
   };
   loadNext();
@@ -57,6 +149,74 @@ function createWindow() {
     mainWindow = null;
   });
 }
+
+// Parakeet AI-style Floating Window & Anti-Screen-Share Protection IPC Handlers
+ipcMain.handle('toggle-floating-mode', async (event, requestedState) => {
+  if (!mainWindow) return { isFloating: false, isProtected: isContentProtected };
+  const target = requestedState !== undefined ? Boolean(requestedState) : !isFloatingMode;
+  isFloatingMode = target;
+
+  if (isFloatingMode) {
+    savedBounds = mainWindow.getBounds();
+    const { screen } = require('electron');
+    const display = screen.getDisplayMatching(savedBounds) || screen.getPrimaryDisplay();
+    const { x, y, width: screenWidth, height: screenHeight } = display.workArea;
+    const floatWidth = 440;
+    const floatHeight = Math.min(680, screenHeight - 60);
+    const posX = x + screenWidth - floatWidth - 24;
+    const posY = y + 40;
+
+    mainWindow.setMinimumSize(360, 380);
+    mainWindow.setBounds({ x: posX, y: posY, width: floatWidth, height: floatHeight });
+    mainWindow.setAlwaysOnTop(true, 'floating', 1);
+    if (mainWindow.setVisibleOnAllWorkspaces) {
+      mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    }
+    mainWindow.setContentProtection(true);
+    isContentProtected = true;
+  } else {
+    mainWindow.setAlwaysOnTop(false);
+    mainWindow.setMinimumSize(480, 520);
+    if (savedBounds) {
+      mainWindow.setBounds(savedBounds);
+    } else {
+      mainWindow.setBounds({ width: 960, height: 720 });
+      mainWindow.center();
+    }
+  }
+  mainWindow.webContents.send('floating-mode-changed', isFloatingMode);
+  return { isFloating: isFloatingMode, isProtected: isContentProtected };
+});
+
+ipcMain.handle('set-content-protection', async (event, enable) => {
+  if (!mainWindow) return false;
+  try {
+    const val = Boolean(enable);
+    mainWindow.setContentProtection(val);
+    isContentProtected = val;
+    mainWindow.webContents.send('stealth-status-changed', { isProtected: isContentProtected });
+    return isContentProtected;
+  } catch (err) {
+    console.warn('[Electron] Failed to toggle setContentProtection:', err);
+    return false;
+  }
+});
+
+ipcMain.handle('get-stealth-status', async () => {
+  return {
+    isElectron: true,
+    isFloating: isFloatingMode,
+    isProtected: isContentProtected,
+    isAlwaysOnTop: mainWindow ? mainWindow.isAlwaysOnTop() : false,
+  };
+});
+
+ipcMain.handle('set-window-opacity', async (event, opacity) => {
+  if (!mainWindow) return 1.0;
+  const op = Math.max(0.3, Math.min(1.0, Number(opacity) || 1.0));
+  mainWindow.setOpacity(op);
+  return op;
+});
 
 
 app.whenReady().then(async () => {

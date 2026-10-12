@@ -9,6 +9,7 @@ import {
   Layers,
   HelpCircle,
   ExternalLink,
+  ShieldCheck,
 } from 'lucide-react';
 import {
   AnswerLengthMode,
@@ -31,10 +32,13 @@ import { SecondScreenView } from './views/SecondScreenView';
 import { JoinSessionView } from './views/JoinSessionView';
 import { ContextProfileView } from './views/ContextProfileView';
 import { PostSessionView } from './views/PostSessionView';
+import { FloatingOverlayView } from './views/FloatingOverlayView';
 
 export function App() {
   // Navigation / Mode state
-  const [appMode, setAppMode] = useState<'desktop' | 'second_screen' | 'join' | 'profile'>('desktop');
+  const [appMode, setAppMode] = useState<'desktop' | 'second_screen' | 'join' | 'profile' | 'floating'>('desktop');
+  const [isStealthProtected, setIsStealthProtected] = useState<boolean>(true);
+  const [isElectron, setIsElectron] = useState<boolean>(false);
   const [joinCodeParam, setJoinCodeParam] = useState<string>('');
   const [localIp, setLocalIp] = useState<string>('localhost');
 
@@ -68,8 +72,31 @@ export function App() {
       setAppMode('join');
     } else if (mode === 'second_screen') {
       setAppMode('join');
+    } else if (mode === 'floating') {
+      setAppMode('floating');
     } else if (mode === 'desktop') {
       setAppMode('desktop');
+    }
+
+    // Connect to Electron floating mode & stealth content protection IPC if in desktop shell
+    if (window.electronAPI) {
+      setIsElectron(true);
+      window.electronAPI.getStealthStatus?.().then(status => {
+        if (status) {
+          setIsStealthProtected(status.isProtected);
+          if (status.isFloating) {
+            setAppMode('floating');
+          }
+        }
+      }).catch(() => {});
+
+      window.electronAPI.on('floating-mode-changed', (floating: boolean) => {
+        setAppMode(floating ? 'floating' : 'desktop');
+      });
+
+      window.electronAPI.on('stealth-status-changed', (info: { isProtected: boolean }) => {
+        setIsStealthProtected(info.isProtected);
+      });
     }
   }, []);
 
@@ -479,6 +506,65 @@ export function App() {
     handleIngestTranscript(speaker, text);
   };
 
+  const handleToggleFloatingMode = async () => {
+    if (appMode === 'floating') {
+      try {
+        if (window.electronAPI?.toggleFloatingMode) {
+          await window.electronAPI.toggleFloatingMode(false);
+        }
+      } catch (err) {
+        console.warn('[FloatingMode] Electron IPC note:', err);
+      }
+      setAppMode('desktop');
+    } else {
+      try {
+        if (window.electronAPI?.toggleFloatingMode) {
+          await window.electronAPI.toggleFloatingMode(true);
+        }
+      } catch (err) {
+        console.warn('[FloatingMode] Electron IPC note:', err);
+      }
+      setAppMode('floating');
+    }
+  };
+
+  const handleToggleStealthProtection = async () => {
+    const nextVal = !isStealthProtected;
+    setIsStealthProtected(nextVal);
+    try {
+      if (window.electronAPI?.setContentProtection) {
+        await window.electronAPI.setContentProtection(nextVal);
+      }
+    } catch (err) {
+      console.warn('[StealthProtection] Electron IPC note:', err);
+    }
+  };
+
+  // If in Parakeet AI-style Floating Overlay mode, render the compact always-on-top stealth widget
+  if (appMode === 'floating') {
+    return (
+      <FloatingOverlayView
+        session={session}
+        latencyMs={latencyMs}
+        isMicActive={audioState.isMicActive}
+        isSystemAudioActive={audioState.isSystemAudioActive}
+        micVolume={audioState.micVolume}
+        systemVolume={audioState.systemVolume}
+        vadActive={audioState.vadActive}
+        transcripts={transcripts}
+        questions={questions}
+        currentQuestion={currentQuestion}
+        currentAnswer={currentAnswer}
+        isProtected={isStealthProtected}
+        onToggleProtection={handleToggleStealthProtection}
+        onExitFloatingMode={handleToggleFloatingMode}
+        onLengthModeChange={handleLengthModeChange}
+        onTriggerModifier={handleTriggerModifier}
+        onManualAsk={handleManualAsk}
+      />
+    );
+  }
+
   return (
     <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column' }}>
       {/* Top Universal App Navigation Bar */}
@@ -562,6 +648,15 @@ export function App() {
           >
             <FileText size={13} /> Context Profile
           </button>
+
+          {/* Parakeet AI-style Stealth Floating Window Button */}
+          <button
+            onClick={handleToggleFloatingMode}
+            className="btn btn-sm btn-stealth"
+            title="Parakeet AI-style Floating Window. Stays pinned on top & 100% invisible to Google Meet, Zoom, and Teams screen sharing."
+          >
+            <ShieldCheck size={14} /> Stealth Window
+          </button>
         </div>
       </header>
 
@@ -590,6 +685,7 @@ export function App() {
             onResumeSession={handleResumeSession}
             onEndSession={handleEndSession}
             onSimulateSpeech={handleSimulateSpeech}
+            onLaunchFloatingMode={handleToggleFloatingMode}
           />
         )}
 

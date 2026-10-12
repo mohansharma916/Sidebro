@@ -18,7 +18,8 @@
     "docker:build": "docker compose build",
     "docker:up": "docker compose up -d",
     "docker:down": "docker compose down",
-    "electron": "electron ./electron/main.cjs"
+    "electron": "electron ./electron/main.cjs",
+    "dev:electron": "concurrently -n \"SERVERS,ELECTRON\" -c \"cyan,green\" \"npm run dev\" \"electron ./electron/main.cjs\""
   },
   "keywords": [
     "realtime",
