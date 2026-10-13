@@ -619,10 +619,29 @@ export const FloatingOverlayView: React.FC<FloatingOverlayViewProps> = ({
               >
                 {currentAnswer ? (
                   <>
-                    {/* Direct Answer */}
+                    {/* Direct Summary Callout Box */}
                     {currentAnswer.directAnswer && (
-                      <div style={{ marginBottom: '8px', color: '#f1f5f9', fontWeight: 500 }}>
-                        <FormattedText text={currentAnswer.directAnswer} />
+                      <div style={{
+                        background: 'rgba(0, 242, 254, 0.08)',
+                        border: '1px solid rgba(0, 242, 254, 0.25)',
+                        borderRadius: '8px',
+                        padding: '8px 10px',
+                        marginBottom: '8px',
+                      }}>
+                        <span style={{
+                          display: 'block',
+                          fontSize: '0.64rem',
+                          fontWeight: 700,
+                          textTransform: 'uppercase',
+                          letterSpacing: '0.08em',
+                          color: '#38bdf8',
+                          marginBottom: '3px',
+                        }}>
+                          Direct Summary (5-sec scan)
+                        </span>
+                        <div style={{ color: '#f8fafc', fontWeight: 500, fontSize: '0.86rem' }}>
+                          <FormattedText text={currentAnswer.directAnswer} />
+                        </div>
                       </div>
                     )}
 
