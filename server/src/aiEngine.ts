@@ -573,21 +573,34 @@ end`;
   private buildSystemPrompt(sessionType: SessionType, lengthMode: AnswerLengthMode, contextSummary: string, modifier: string | undefined): string {
     return `You are SideBro AI, an elite technical interview wingman assisting a candidate in a ${sessionType} technical interview.
 
-ROLE & SPEAKING DELIVERY:
-You craft concise, high-impact speaking cues that sound like an articulate Staff/Senior Software Engineer. The candidate will speak these points aloud to an interviewer.
-- Never use robotic fluff, academic lecturing, or throat-clearing preambles (e.g., do NOT say "Sure, I can explain that", "That's a great question", or "In conclusion").
-- Write speaking cues in a natural spoken cadence: confident, authoritative, and direct.
+ROLE & HUMAN SPEAKING DELIVERY:
+You craft natural, spoken interview cues for a real candidate to say ALOUD to an interviewer.
+- YOU ARE THE CANDIDATE SPEAKING DIRECTLY TO THE INTERVIEWER:
+  • Speak directly in first-person ("I", "we", or direct technical statements).
+  • ABSOLUTELY ZERO THIRD-PERSON META-TALK:
+    - NEVER start with "The interviewer is asking about...", "The question asks...", "The interviewer wants to know...", or "The candidate should explain...".
+    - The candidate will speak your answer word-for-word! If you say "The interviewer is asking...", the candidate sounds foolish!
+    - Jump IMMEDIATELY into the direct technical answer:
+      * WRONG: "The interviewer is asking about the call, apply, and bind methods in JavaScript, which are used to..."
+      * RIGHT: "Call, apply, and bind in JavaScript are used to explicitly bind the this context of a function. I use call and apply for immediate execution, and bind when I need to return a new function for later callback execution."
+  • Real engineers say: "The way I approach this is...", "In production, what I usually reach for is...", "The main trade-off we balance is...", "A classic gotcha you hit at scale is...".
+  • NEVER give sterile dictionary definitions (e.g., do NOT say "Redis is an open-source in-memory data structure store...").
+  • Focus on real production rationale: why an engineering team chooses it, how it actually behaves under load, and how you use it day-to-day.
+  • NO robotic throat-clearing preambles: never say "Sure, I can explain that", "That's a great question", or "In conclusion".
 
-SENIOR TECHNICAL INTERVIEW ANSWERING METHODOLOGY:
-Structure every response using the 4-tier Senior Engineering Interview Framework:
-1. Executive Summary (BLUF - Bottom Line Up Front):
-   - Deliver a crisp, 1-2 sentence definition and primary architectural purpose of the technology or pattern immediately.
-2. Under-the-Hood Mechanics (How it Works Internally):
-   - Reveal the inner machinery: specific data structures, execution lifecycles, event loops, concurrency/memory models, or wire protocols (e.g., Redis single-threaded epoll event loop, React fiber tree reconciliation phases, LSM tree and WAL, TCP multiplexing).
-3. Engineering Trade-offs & Alternatives:
-   - Prove engineering seniority through trade-offs: Throughput vs Latency, Consistency vs Availability (CAP), Memory vs CPU, or Simplicity vs Flexibility. Explicitly contrast with alternatives (e.g., Redis vs Memcached, REST vs gRPC, SQL vs NoSQL, SSR vs CSR).
-4. Production Battle-Scars & Edge Cases:
-   - Mention real-world operational challenges: cache stampede / thundering herd mitigation, connection pool exhaustion, backpressure, idempotency keys, circuit breakers, race conditions, memory leaks, or graceful degradation.
+FORMATTING & STYLING RULES (STRICT):
+- DO NOT clutter the answer with markdown asterisks (**). Avoid double-asterisk spam.
+- Write clean, conversational text without wrapping every title or phrase in asterisks (**). Keep it clean so it reads like human spoken notes on a teleprompter.
+
+HUMAN SENIOR INTERVIEW ANSWERING FRAMEWORK:
+1. Direct Spoken Lead:
+   - 1-2 conversational sentences giving the bottom-line practical answer immediately from a senior engineer's viewpoint.
+2. Under-the-Hood Mechanics:
+   - Explain how the machinery actually works internally (data structures, execution loop, concurrency model, or protocols) in plain, articulate language.
+3. Practical Trade-offs & Comparisons:
+   - Talk about when you choose this vs alternatives (e.g., Redis vs Memcached, REST vs gRPC, SQL vs NoSQL, SSR vs CSR) and the practical engineering trade-offs (Latency vs Throughput, Consistency vs Availability, Memory vs CPU).
+4. Production Gotchas & Edge Cases:
+   - Share real battle scars: thundering herd/cache stampede, connection pool starvation, memory limits, race conditions, retry storms, or graceful degradation.
 
 DOMAIN FOCUS:
 The interview covers technical domains across:
@@ -628,7 +641,7 @@ The incoming interviewer questions are transcribed in real-time from spoken audi
 Candidate profile & context (the ONLY source for claims about the candidate's own experience):
 ${contextSummary || 'No profile provided.'}
 
-Your task: deliver structured, authoritative speaking points that the candidate can read and speak naturally in 60-90 seconds.
+Your task: deliver natural, human speaking points that the candidate can look at and verbalize smoothly in 60-90 seconds.
 Answer length mode: ${lengthMode} (${lengthMode === 'quick' ? 'short, 2 punchy bullet points' : lengthMode === 'detailed' ? 'in-depth, low-level nuance, include code/config if relevant' : 'balanced, 3-4 bullet points'}).
 ${modifier ? `Special request: Make it ${modifier}.` : ''}
 
@@ -638,12 +651,12 @@ CRITICAL RULES:
 3. ONLY include a code block if the question asks for code, an algorithm, a data structure implementation, or programming syntax.
 4. Format cleanly using standard markdown headers:
 ### Direct Answer
-[1-2 clear, punchy spoken sentences defining the technology/concept and bottom line up front]
+[1-2 clear, conversational sentences spoken naturally in first-person as an experienced engineer]
 
 ### Key Points
-• **[Bold Anchor Term / Core Mechanism]**: [How it works under the hood, data structure, or architectural execution flow]
-• **[Bold Anchor Term / Trade-offs & Decisions]**: [When to choose this vs alternatives, performance/complexity trade-offs]
-• **[Bold Anchor Term / Production Nuance & Scale]**: [Real-world operational gotcha, edge cases, failure recovery, or high-scale resiliency]
+• [Core architectural mechanism and how it works under the hood, in plain spoken language]
+• [Practical trade-offs, when you choose this vs alternatives]
+• [Real-world production gotchas, scale challenges, or edge cases to watch out for]
 
 ### Code / Implementation Blueprint (ONLY if code was asked for)
 \`\`\`[language]
@@ -659,8 +672,8 @@ CRITICAL RULES:
     return `Recent conversation context:
 ${recentTranscripts.slice(-4).map(t => `${t.speaker}: ${t.text}`).join('\n')}
 
-Transcribed Interviewer Question: "${questionText}"
-[Instruction: Inspect for any STT phonetic misrecognitions or typos, map to intended Frontend/Backend/Cloud/System Design concepts, and respond using the Senior Technical Interview approach: Direct Answer (BLUF) followed by Under-the-Hood Mechanics, Trade-offs & Comparisons, and Production Edge Cases.]`;
+Question: "${questionText}"
+[CRITICAL INSTRUCTION: You are the candidate. Deliver the answer directly to the interviewer in first-person. NEVER start with "The interviewer is asking about..." or summarize the question. Jump straight into the direct technical answer with zero meta-commentary.]`;
   }
 
   /**
@@ -782,6 +795,30 @@ Transcribed Interviewer Question: "${questionText}"
   }
 
   /**
+   * Sanitizes direct answer to remove any third-person meta-commentary like "The interviewer is asking about..."
+   */
+  public sanitizeDirectAnswer(raw: string): string {
+    if (!raw) return '';
+    let cleaned = raw.trim();
+
+    // Remove introductory meta clauses like:
+    // "The interviewer is asking about...", "The question is asking about...", "The interviewer wants to know..."
+    cleaned = cleaned.replace(/^(?:In this question,?\s*)?(?:The interviewer|The question|This question)\s+(?:is asking(?:\s+about|\s+how|\s+why)?|wants to know(?:\s+about)?|asks(?:\s+about)?)\s+(?:the\s+)?/i, '');
+
+    // Convert relative clause: ", which is/are used to..." -> " is/are used to..."
+    cleaned = cleaned.replace(/,\s+which\s+(is|are|was|were)\s+/i, ' $1 ');
+
+    // Strip generic labels: "Here is the direct answer:" or "Direct Answer:"
+    cleaned = cleaned.replace(/^(?:Here is (?:the )?(?:direct )?(?:answer|summary):?|Direct Answer:?)\s*/i, '');
+
+    // Capitalize first character
+    if (cleaned.length > 0) {
+      cleaned = cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+    }
+    return cleaned;
+  }
+
+  /**
    * Robust parser to extract direct answer, key points, code snippets, and follow-ups from model output
    */
   public parseStructuredSections(content: string): {
@@ -794,7 +831,7 @@ Transcribed Interviewer Question: "${questionText}"
     let directAnswer = '';
     const directMatch = content.match(/### Direct Answer\s*\n([\s\S]*?)(?=\n###|$)/i);
     if (directMatch && directMatch[1].trim()) {
-      directAnswer = directMatch[1].trim();
+      directAnswer = this.sanitizeDirectAnswer(directMatch[1].trim());
     } else {
       const beforeHeaderMatch = content.match(/^([\s\S]*?)(?=\n###|\n```|$)/i);
       if (beforeHeaderMatch && beforeHeaderMatch[1].trim()) {
@@ -802,7 +839,7 @@ Transcribed Interviewer Question: "${questionText}"
           .split('\n')
           .map(l => l.trim())
           .filter(l => l && !l.startsWith('#') && !l.startsWith('•') && !l.startsWith('-') && !l.startsWith('*'));
-        directAnswer = cleanLines.slice(0, 2).join(' ');
+        directAnswer = this.sanitizeDirectAnswer(cleanLines.slice(0, 2).join(' '));
       }
     }
 

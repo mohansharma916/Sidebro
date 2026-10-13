@@ -14,6 +14,7 @@ import {
   Layers,
 } from 'lucide-react';
 import { AnswerLengthMode, DetectedQuestion, GeneratedAnswer, QuestionCategory } from '../types';
+import { FormattedText } from './FormattedText';
 
 interface StreamingAnswerProps {
   currentQuestion: DetectedQuestion | null;
@@ -263,7 +264,7 @@ export const StreamingAnswer: React.FC<StreamingAnswerProps> = ({
               color: '#f8fafc',
               lineHeight: 1.5,
             }}>
-              {currentAnswer.directAnswer}
+              <FormattedText text={currentAnswer.directAnswer} />
             </p>
           </div>
         )}
@@ -283,37 +284,24 @@ export const StreamingAnswer: React.FC<StreamingAnswerProps> = ({
               Key Points
             </span>
             <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              {currentAnswer.keyPoints.map((point, idx) => {
-                // Parse markdown bold if present
-                const parts = point.split(/(\*\*.*?\*\*)/g);
-                return (
-                  <div
-                    key={idx}
-                    style={{
-                      display: 'flex',
-                      alignItems: 'flex-start',
-                      gap: '10px',
-                      fontSize: '0.94rem',
-                      color: '#cbd5e1',
-                      lineHeight: 1.55,
-                    }}
-                  >
-                    <span style={{ color: '#00f2fe', marginTop: '3px' }}>•</span>
-                    <div>
-                      {parts.map((p, pIdx) => {
-                        if (p.startsWith('**') && p.endsWith('**')) {
-                          return (
-                            <strong key={pIdx} style={{ color: '#ffffff', fontWeight: 600 }}>
-                              {p.slice(2, -2)}
-                            </strong>
-                          );
-                        }
-                        return p;
-                      })}
-                    </div>
+              {currentAnswer.keyPoints.map((point, idx) => (
+                <div
+                  key={idx}
+                  style={{
+                    display: 'flex',
+                    alignItems: 'flex-start',
+                    gap: '10px',
+                    fontSize: '0.94rem',
+                    color: '#cbd5e1',
+                    lineHeight: 1.55,
+                  }}
+                >
+                  <span style={{ color: '#00f2fe', marginTop: '3px' }}>•</span>
+                  <div>
+                    <FormattedText text={point} />
                   </div>
-                );
-              })}
+                </div>
+              ))}
             </div>
           </div>
         )}
@@ -350,8 +338,8 @@ export const StreamingAnswer: React.FC<StreamingAnswerProps> = ({
 
         {/* Raw / Streaming Content Markdown fallback */}
         {!currentAnswer?.directAnswer && currentAnswer?.fullContent && (
-          <div className="markdown-body" style={{ color: '#cbd5e1' }}>
-            {currentAnswer.fullContent}
+          <div className="markdown-body" style={{ color: '#cbd5e1', whiteSpace: 'pre-wrap' }}>
+            <FormattedText text={currentAnswer.fullContent} />
             {!currentAnswer.isComplete && <span className="streaming-cursor" />}
           </div>
         )}

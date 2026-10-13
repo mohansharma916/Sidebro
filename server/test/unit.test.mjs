@@ -55,6 +55,15 @@ test('parseStructuredSections extracts all sections', () => {
   assert.deepEqual(parsed.keyPoints, ['**Fast** lookups', 'Simple']);
   assert.equal(parsed.exampleOrSnippet, 'print(1)');
   assert.deepEqual(parsed.followUpQuestions, ['Why?', 'How?']);
+
+  // Meta-commentary sanitization
+  const metaParsed = ai.parseStructuredSections(
+    '### Direct Answer\nThe interviewer is asking about the call, apply, and bind methods in JavaScript, which are used to explicitly set the this context for a function when it is invoked.\n\n### Key Points\n• Call executes immediately'
+  );
+  assert.equal(
+    metaParsed.directAnswer,
+    'Call, apply, and bind methods in JavaScript are used to explicitly set the this context for a function when it is invoked.'
+  );
 });
 
 test('ThinkFilter strips reasoning blocks split across chunks', () => {

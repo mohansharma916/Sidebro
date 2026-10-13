@@ -33,6 +33,7 @@ import { QRCodeDisplay } from '../components/QRCodeDisplay';
 import { DeviceHealthBar } from '../components/DeviceHealthBar';
 import { InterviewSimulator } from '../components/InterviewSimulator';
 import { PostSessionView } from './PostSessionView';
+import { FormattedText } from '../components/FormattedText';
 
 interface DesktopAgentViewProps {
   session: SessionState | null;
@@ -734,12 +735,29 @@ export const DesktopAgentView: React.FC<DesktopAgentViewProps> = ({
                     maxHeight: '180px',
                     overflowY: 'auto',
                   }}>
-                    <div style={{ fontSize: '0.72rem', color: '#38bdf8', fontWeight: 700, marginBottom: '4px' }}>
+                    <div style={{ fontSize: '0.72rem', color: '#38bdf8', fontWeight: 700, marginBottom: '6px' }}>
                       Direct Answer (Synced to Second Screen):
                     </div>
-                    <div style={{ fontSize: '0.82rem', color: '#cbd5e1', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
-                      {currentAnswer.fullContent || currentAnswer.directAnswer}
-                    </div>
+                    {currentAnswer.directAnswer ? (
+                      <div>
+                        <div style={{ fontSize: '0.84rem', color: '#f1f5f9', lineHeight: 1.5, marginBottom: '6px' }}>
+                          <FormattedText text={currentAnswer.directAnswer} />
+                        </div>
+                        {currentAnswer.keyPoints && currentAnswer.keyPoints.length > 0 && (
+                          <ul style={{ paddingLeft: '16px', margin: '4px 0', color: '#cbd5e1', fontSize: '0.78rem' }}>
+                            {currentAnswer.keyPoints.map((pt, idx) => (
+                              <li key={idx} style={{ marginBottom: '3px' }}>
+                                <FormattedText text={pt} />
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    ) : (
+                      <div style={{ fontSize: '0.82rem', color: '#cbd5e1', lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
+                        <FormattedText text={currentAnswer.fullContent || ''} />
+                      </div>
+                    )}
                   </div>
                 ) : (
                   <div style={{ padding: '16px', textAlign: 'center', color: '#94a3b8', fontSize: '0.8rem' }}>

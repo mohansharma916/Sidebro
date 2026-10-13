@@ -24,6 +24,7 @@ import {
   SessionState,
   TranscriptItem,
 } from '../types';
+import { FormattedText } from '../components/FormattedText';
 
 interface FloatingOverlayViewProps {
   session: SessionState | null;
@@ -621,7 +622,7 @@ export const FloatingOverlayView: React.FC<FloatingOverlayViewProps> = ({
                     {/* Direct Answer */}
                     {currentAnswer.directAnswer && (
                       <div style={{ marginBottom: '8px', color: '#f1f5f9', fontWeight: 500 }}>
-                        {currentAnswer.directAnswer}
+                        <FormattedText text={currentAnswer.directAnswer} />
                       </div>
                     )}
 
@@ -630,7 +631,7 @@ export const FloatingOverlayView: React.FC<FloatingOverlayViewProps> = ({
                       <ul style={{ paddingLeft: '16px', margin: '6px 0', color: '#cbd5e1' }}>
                         {currentAnswer.keyPoints.map((pt, idx) => (
                           <li key={idx} style={{ marginBottom: '4px' }}>
-                            {pt}
+                            <FormattedText text={pt} />
                           </li>
                         ))}
                       </ul>
@@ -658,7 +659,7 @@ export const FloatingOverlayView: React.FC<FloatingOverlayViewProps> = ({
                     {/* Full streaming markdown if direct answer is not yet parsed */}
                     {!currentAnswer.directAnswer && currentAnswer.fullContent && (
                       <div style={{ whiteSpace: 'pre-wrap', color: '#cbd5e1' }}>
-                        {currentAnswer.fullContent}
+                        <FormattedText text={currentAnswer.fullContent} />
                       </div>
                     )}
                   </>
