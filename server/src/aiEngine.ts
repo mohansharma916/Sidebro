@@ -79,14 +79,22 @@ export class ThinkFilter {
 export class AIEngine {
   private groqApiKey: string | undefined;
   private geminiApiKey: string | undefined;
+  private openaiApiKey: string | undefined;
   private groqModel: string;
   private geminiModel: string;
+  private openaiModel: string;
+  private openaiBaseUrl: string;
+  private preferredProvider: string | undefined;
 
   constructor() {
     this.groqApiKey = process.env.GROQ_API_KEY;
     this.geminiApiKey = process.env.GEMINI_API_KEY;
+    this.openaiApiKey = process.env.OPENAI_API_KEY;
     this.groqModel = process.env.GROQ_MODEL || 'qwen/qwen3.8-27b';
     this.geminiModel = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+    this.openaiModel = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+    this.openaiBaseUrl = (process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/+$/, '');
+    this.preferredProvider = process.env.AI_PROVIDER?.toLowerCase();
   }
 
   /**
@@ -106,7 +114,16 @@ export class AIEngine {
 
     const answerId = `ans-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
     const contextSummary = contextChunks.map(c => `[${c.source.toUpperCase()}]: ${c.content}`).join('\n\n');
-    const hasProvider = !!(this.groqApiKey || this.geminiApiKey);
+    const hasProvider = !!(this.groqApiKey || this.geminiApiKey || this.openaiApiKey || process.env.OPENAI_BASE_URL);
+
+    // Initial default model name
+    const defaultModel = this.groqApiKey
+      ? `${this.groqModel} (Groq)`
+      : this.openaiApiKey
+      ? `${this.openaiModel} (OpenAI)`
+      : this.geminiApiKey
+      ? this.geminiModel
+      : OFFLINE_MODEL;
 
     // With a real provider the answer starts empty and is filled only from the model's output,
     // so no template text can leak into it.
@@ -121,7 +138,7 @@ export class AIEngine {
       fullContent: '',
       isComplete: false,
       lengthMode,
-      model: this.groqApiKey ? `${this.groqModel} (Groq)` : this.geminiApiKey ? this.geminiModel : OFFLINE_MODEL,
+      model: defaultModel,
       contextUsed: contextChunks.map(c => c.source),
       timestamp: Date.now(),
     };
@@ -158,17 +175,38 @@ export class AIEngine {
 
     callbacks.onStart(answer);
 
-    const providers: { name: string; run: (sig: AbortSignal) => Promise<void> }[] = [];
+    const providers: { id: string; name: string; model: string; run: (sig: AbortSignal) => Promise<void> }[] = [];
     if (this.groqApiKey) {
       providers.push({
+        id: 'groq',
         name: 'Groq',
+        model: `${this.groqModel} (Groq)`,
         run: sig => this.streamFromGroq(question.questionText, sessionType, lengthMode, contextSummary, recentTranscripts, actionModifier, emit, sig),
+      });
+    }
+    if (this.openaiApiKey || process.env.OPENAI_BASE_URL) {
+      providers.push({
+        id: 'openai',
+        name: this.openaiBaseUrl.includes('openai.com') ? 'OpenAI' : 'CustomLLM',
+        model: `${this.openaiModel} (${this.openaiBaseUrl.includes('openai.com') ? 'OpenAI' : 'Custom'})`,
+        run: sig => this.streamFromOpenAI(question.questionText, sessionType, lengthMode, contextSummary, recentTranscripts, actionModifier, emit, sig),
       });
     }
     if (this.geminiApiKey) {
       providers.push({
+        id: 'gemini',
         name: 'Gemini',
+        model: this.geminiModel,
         run: sig => this.streamFromGemini(question.questionText, sessionType, lengthMode, contextSummary, recentTranscripts, actionModifier, emit, sig),
+      });
+    }
+
+    // Sort according to preferredProvider if specified (e.g. AI_PROVIDER=openai or AI_PROVIDER=gemini)
+    if (this.preferredProvider) {
+      providers.sort((a, b) => {
+        if (a.id === this.preferredProvider) return -1;
+        if (b.id === this.preferredProvider) return 1;
+        return 0;
       });
     }
 
@@ -178,7 +216,7 @@ export class AIEngine {
         ? AbortSignal.any([signal, AbortSignal.timeout(PROVIDER_TIMEOUT_MS)])
         : AbortSignal.timeout(PROVIDER_TIMEOUT_MS);
       try {
-        answer.model = provider.name === 'Groq' ? `${this.groqModel} (Groq)` : this.geminiModel;
+        answer.model = provider.model;
         await provider.run(sig);
         this.finish(answer, state, startTime, callbacks, true);
         return;
@@ -779,6 +817,56 @@ Question: "${questionText}"
 
     if (!response.ok) {
       throw new Error(`Groq API HTTP ${response.status}: ${await response.text()}`);
+    }
+
+    const think = new ThinkFilter();
+    await this.readSse(response, data => {
+      if (data === '[DONE]') return;
+      try {
+        const delta = JSON.parse(data).choices?.[0]?.delta?.content;
+        if (delta) emit(think.push(delta));
+      } catch {
+        // ignore malformed lines
+      }
+    });
+    emit(think.flush());
+  }
+
+  /**
+   * Stream from OpenAI or any OpenAI-compatible API (Ollama, DeepSeek, OpenRouter, Together AI).
+   */
+  private async streamFromOpenAI(
+    questionText: string,
+    sessionType: SessionType,
+    lengthMode: AnswerLengthMode,
+    contextSummary: string,
+    recentTranscripts: { speaker: string; text: string }[],
+    modifier: string | undefined,
+    emit: (token: string) => void,
+    signal: AbortSignal
+  ): Promise<void> {
+    const url = `${this.openaiBaseUrl}/chat/completions`;
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${this.openaiApiKey || 'not-needed'}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: this.openaiModel,
+        messages: [
+          { role: 'system', content: this.buildSystemPrompt(sessionType, lengthMode, contextSummary, modifier) },
+          { role: 'user', content: this.buildUserPrompt(questionText, recentTranscripts) },
+        ],
+        temperature: 0.2,
+        max_tokens: lengthMode === 'quick' ? 300 : lengthMode === 'detailed' ? 850 : 550,
+        stream: true,
+      }),
+      signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`OpenAI-compatible API HTTP ${response.status}: ${await response.text()}`);
     }
 
     const think = new ThinkFilter();

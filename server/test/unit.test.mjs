@@ -74,9 +74,11 @@ test('ThinkFilter strips reasoning blocks split across chunks', () => {
 
 test('offline answers never invent first-person experience', async () => {
   // AIEngine reads provider keys at construction time; build it with no keys set.
-  const saved = { GROQ_API_KEY: process.env.GROQ_API_KEY, GEMINI_API_KEY: process.env.GEMINI_API_KEY };
+  const saved = { GROQ_API_KEY: process.env.GROQ_API_KEY, GEMINI_API_KEY: process.env.GEMINI_API_KEY, OPENAI_API_KEY: process.env.OPENAI_API_KEY, OPENAI_BASE_URL: process.env.OPENAI_BASE_URL };
   delete process.env.GROQ_API_KEY;
   delete process.env.GEMINI_API_KEY;
+  delete process.env.OPENAI_API_KEY;
+  delete process.env.OPENAI_BASE_URL;
   const ai = new AIEngine();
   for (const [key, value] of Object.entries(saved)) {
     if (value !== undefined) process.env[key] = value;
