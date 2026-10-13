@@ -14,6 +14,9 @@ export class NetworkService {
   }
 
   private detectLocalIp(): string {
+    // Inside Docker the interfaces are container-internal, so allow the host's LAN IP to be passed in
+    if (process.env.HOST_IP) return process.env.HOST_IP;
+
     const interfaces = os.networkInterfaces();
     for (const ifaceName of Object.keys(interfaces)) {
       const addresses = interfaces[ifaceName];

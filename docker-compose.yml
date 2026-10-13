@@ -1,36 +1,26 @@
 services:
-  backend:
+  sidebro:
     build:
       context: .
-      dockerfile: server/Dockerfile
-    container_name: sidebro-backend
+      dockerfile: Dockerfile
+    image: sidebro-ai:latest
+    container_name: sidebro
     restart: unless-stopped
+    # Host port is configurable (SIDEBRO_PORT) in case 3001 is taken by another project
     ports:
-      - "3001:3001"
+      - "${SIDEBRO_PORT:-3001}:3001"
+    # API keys and model settings come from the repo-root .env (see .env.example)
+    env_file:
+      - path: .env
+        required: false
     environment:
       - PORT=3001
       - NODE_ENV=production
       - DATA_DIR=/app/server/data
-      - GROQ_API_KEY=${GROQ_API_KEY:-}
-      - GROQ_MODEL=${GROQ_MODEL:-}
-      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
-      - GEMINI_MODEL=${GEMINI_MODEL:-}
-      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      - ADMIN_TOKEN=${ADMIN_TOKEN:-}
-      - CORS_ORIGINS=${CORS_ORIGINS:-}
+      # The container cannot see the host's Wi-Fi IP; pass it so the phone pairing QR code works
+      - HOST_IP=${HOST_IP:-}
     volumes:
       - sidebro-data:/app/server/data
-
-  client:
-    build:
-      context: .
-      dockerfile: client/Dockerfile
-    container_name: sidebro-client
-    restart: unless-stopped
-    ports:
-      - "5173:80"
-    depends_on:
-      - backend
 
 volumes:
   sidebro-data:

@@ -126,23 +126,24 @@ npm run start
 
 ## 🐳 Docker Deployment
 
-Run the complete stack (NestJS backend + Nginx frontend) with Docker Compose:
+The whole app runs as a single image: the NestJS backend also serves the built React client, so the UI, REST API and WebSocket all share one port. After any code change, rebuild and restart with one command:
 
 ```bash
-# Build and start containers in the background
+# Build the image and (re)start the container in the background.
+# Also passes your Mac's Wi-Fi IP (HOST_IP) so the phone pairing QR code works.
 npm run docker:up
-# Or directly with Docker:
-docker compose up -d --build
 
-# View container logs
-docker compose logs -f
+# View logs
+npm run docker:logs
 
-# Stop containers
+# Stop
 npm run docker:down
 ```
 
-- **Client App**: [http://localhost:5173/](http://localhost:5173/)
-- **NestJS API**: [http://localhost:3001/api/health](http://localhost:3001/api/health)
+- **App + API**: [http://localhost:3001/](http://localhost:3001/) (health: `/api/health`)
+- **Configuration**: API keys and models are read from the repo-root `.env` (see `.env.example`).
+- **Port in use?** Set `SIDEBRO_PORT=3002` (in your shell or `.env`) to choose another host port.
+- **Desktop shell against Docker**: `npm run electron:docker` (uses the same `SIDEBRO_PORT`).
 - **Persistent Data**: Automatically saved to Docker volume `sidebro-data` (mapped to `/app/server/data`).
 
 ---
@@ -172,10 +173,10 @@ CI (`.github/workflows/ci.yml`) runs the build (including type-checking) and `np
 
 ```text
 INTERVIEW_HELP/
-├── docker-compose.yml         # Docker orchestration (sidebro-backend + sidebro-client)
+├── Dockerfile                 # Single multi-stage image (client + server on one port)
+├── docker-compose.yml         # Docker orchestration (sidebro)
 ├── .dockerignore              # Docker build exclusions
 ├── server/                    # NestJS Backend API & WebSocket Server
-│   ├── Dockerfile             # Multi-stage production container
 │   ├── tsconfig.json          # Experimental decorators & emitDecoratorMetadata
 │   ├── src/
 │   │   ├── main.ts            # NestJS application bootstrap (WsAdapter, CORS)
@@ -192,8 +193,6 @@ INTERVIEW_HELP/
 │   ├── test/                  # node:test suites (npm test)
 │   └── test-e2e.ts            # Demo walkthrough against a running server
 ├── client/                    # Vite + React + TypeScript + Vanilla CSS
-│   ├── Dockerfile             # Nginx production container
-│   ├── nginx.conf             # Reverse proxy config for API and WebSockets
 │   ├── src/
 │   │   ├── App.tsx            # Main router: Desktop Agent, Second Screen, Join
 │   │   ├── index.css          # Ultra-modern dark mode design system

@@ -26,6 +26,21 @@ test('QuestionDetector detects and classifies real questions', () => {
   assert.equal(qd.analyzeQuestion('What is idempotency in APIs?').isQuestion, true);
 });
 
+test('QuestionDetector detects spoken imperative questions without a question mark', () => {
+  const qd = new QuestionDetector(() => {});
+  for (const q of [
+    'okay tell me how you will implement the cascading delete in mongo TV',
+    'tell me what happens when the event loop is blocked',
+    'show me how you would debounce a search input',
+    'so how would you shard a postgres table',
+  ]) {
+    assert.equal(qd.analyzeQuestion(q).isQuestion, true, q);
+  }
+  for (const g of ['hey can you hear me', 'hello', 'can you hear me']) {
+    assert.equal(qd.analyzeQuestion(g).isQuestion, false, g);
+  }
+});
+
 test('QuestionDetector ignores the candidate (YOU) speaker', async () => {
   const detected = [];
   const qd = new QuestionDetector(q => detected.push(q));

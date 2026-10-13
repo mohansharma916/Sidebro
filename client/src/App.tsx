@@ -515,30 +515,47 @@ export function App() {
     }
   };
 
-  const ensureActiveSessionForStealth = useCallback(async () => {
-    let cur = sessionRef.current;
-    if (!cur || cur.status !== 'active') {
-      await handleCreateSession('technical', 'Live Copilot Session', undefined, 'senior');
-      cur = sessionRef.current;
+  // In-flight guards: entering stealth mode triggers ensureActiveSessionForStealth from both the
+  // toggle handler and the overlay's mount effect. sessionRef is only set after the POST resolves,
+  // so without sharing the pending promise each caller creates its own session (and mic stream).
+  const sessionCreationRef = useRef<Promise<void> | null>(null);
+  const stealthEnsureRef = useRef<Promise<void> | null>(null);
+
+  const ensureLiveSession = async () => {
+    const cur = sessionRef.current;
+    if (cur && cur.status === 'active') return;
+    if (!sessionCreationRef.current) {
+      sessionCreationRef.current = handleCreateSession('technical', 'Live Copilot Session', undefined, 'senior')
+        .finally(() => { sessionCreationRef.current = null; });
     }
-    if (!audioState.isMicActive) {
-      try {
-        await startMicrophone();
-      } catch (e) {
-        console.warn('Auto start mic notice:', e);
-      }
+    await sessionCreationRef.current;
+  };
+
+  const ensureActiveSessionForStealth = useCallback(() => {
+    if (!stealthEnsureRef.current) {
+      stealthEnsureRef.current = (async () => {
+        await ensureLiveSession();
+        if (!audioState.isMicActive) {
+          try {
+            await startMicrophone();
+          } catch (e) {
+            console.warn('Auto start mic notice:', e);
+          }
+        }
+      })().finally(() => { stealthEnsureRef.current = null; });
     }
+    return stealthEnsureRef.current;
   }, [audioState.isMicActive, startMicrophone]);
 
   const handleManualAsk = async (questionText: string) => {
-    let cur = sessionRef.current;
-    if (!cur || cur.status !== 'active') {
-      await handleCreateSession('technical', 'Live Copilot Session', undefined, 'senior');
-      cur = sessionRef.current;
-    }
+    await ensureLiveSession();
+    const cur = sessionRef.current;
     if (cur) {
-      send('manual.ask', { questionText }, cur.id);
-      postJson(`/api/sessions/${cur.id}/ask`, { questionText }).catch(() => {});
+      // REST only (sending manual.ask over the socket too made the server answer twice). It works
+      // even before the socket's join completes; the answer still streams back over the socket.
+      postJson(`/api/sessions/${cur.id}/ask`, { questionText }).catch(err => {
+        console.warn('[App] Manual ask failed:', err);
+      });
     }
   };
 

@@ -63,7 +63,9 @@ export class QuestionDetector {
 
     // Fast path: if chunk ends with '?' or starts with classic question words, evaluate rapidly (650ms)
     const isPunctuationQuestion = text.endsWith('?') && text.split(/\s+/).length >= 4 && !this.isIncompleteSentence(text);
-    const hasQuestionLeader = /^(?:what|how|why|when|where|can\s+you|could\s+you|explain|describe|tell\s+me|compare|difference\s+between)\b/i.test(text.trim());
+    // Leading fillers ("okay", "so", "alright") shouldn't hide the question word
+    const withoutFiller = text.trim().replace(/^(?:(?:okay|ok|so|alright|all\s+right|right|now|and|um+|uh+|well)[\s,.]+)+/i, '');
+    const hasQuestionLeader = /^(?:what|how|why|when|where|can\s+you|could\s+you|explain|describe|tell\s+me|show\s+me|compare|difference\s+between|walk\s+me\s+through)\b/i.test(withoutFiller);
     const isFastQuestion = (isPunctuationQuestion || (hasQuestionLeader && text.split(/\s+/).length >= 5)) && !this.isIncompleteSentence(text);
     const delay = isFastQuestion ? 650 : this.BUFFER_DEBOUNCE_MS;
 
@@ -185,7 +187,13 @@ export class QuestionDetector {
       'tell me about', 'explain', 'describe', 'walk me through',
       'have you ever', 'have you worked', 'have you used',
       'is there a way', 'is it possible', 'do you know',
-      'difference between', 'compare', 'which one'
+      'difference between', 'compare', 'which one',
+      // Imperative / indirect phrasings common in spoken interviews (STT rarely emits '?'),
+      // e.g. "okay tell me how you will implement cascading delete in mongo"
+      'tell me how', 'tell me what', 'tell me why', 'tell me when', 'tell me the',
+      'how you will', 'how you would', 'how will you', 'how would you', 'how to',
+      'show me', 'talk me through', 'give me an example', "what's the", 'what if',
+      'when would you', 'when should', 'where would you', 'do you use', 'have you implemented'
     ];
 
     const hasExplicitQuestionMark = trimmed.includes('?');

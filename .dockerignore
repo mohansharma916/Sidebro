@@ -11,3 +11,11 @@ client/dist
 .DS_Store
 .env.local
 server/data/*.sqlite-journal
+electron
+doc
+.github
+.env
+**/.env
+server/data
+server/server
+**/*.sqlite*
