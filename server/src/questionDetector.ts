@@ -10,7 +10,7 @@ interface QuestionBuffer {
 
 export class QuestionDetector {
   private buffers: Map<string, QuestionBuffer> = new Map();
-  private readonly BUFFER_DEBOUNCE_MS = 3200; // 3.2s debounce allows natural pauses and multi-slice sentence completion
+  private readonly BUFFER_DEBOUNCE_MS = 1200; // Fast 1.2s debounce allows natural pauses without sluggish latency
   private onQuestionDetected: (question: DetectedQuestion) => void;
 
   constructor(onQuestionDetected: (question: DetectedQuestion) => void) {
@@ -61,9 +61,11 @@ export class QuestionDetector {
       clearTimeout(buf.timer);
     }
 
-    // If the chunk explicitly ends with a question mark and is grammatically complete, evaluate slightly faster
-    const isPunctuationQuestion = text.endsWith('?') && text.split(/\s+/).length >= 5 && !this.isIncompleteSentence(text);
-    const delay = isPunctuationQuestion ? 2000 : this.BUFFER_DEBOUNCE_MS;
+    // Fast path: if chunk ends with '?' or starts with classic question words, evaluate rapidly (650ms)
+    const isPunctuationQuestion = text.endsWith('?') && text.split(/\s+/).length >= 4 && !this.isIncompleteSentence(text);
+    const hasQuestionLeader = /^(?:what|how|why|when|where|can\s+you|could\s+you|explain|describe|tell\s+me|compare|difference\s+between)\b/i.test(text.trim());
+    const isFastQuestion = (isPunctuationQuestion || (hasQuestionLeader && text.split(/\s+/).length >= 5)) && !this.isIncompleteSentence(text);
+    const delay = isFastQuestion ? 650 : this.BUFFER_DEBOUNCE_MS;
 
     buf.timer = setTimeout(() => {
       this.evaluateBuffer(sessionId);
@@ -83,10 +85,10 @@ export class QuestionDetector {
     // Check if the current sentence is visibly incomplete or ends with a hanging conjunction/preposition
     if (this.isIncompleteSentence(fullText) && buf.incompleteRetries < 2) {
       buf.incompleteRetries++;
-      // Still an incomplete thought / sentence fragment, wait for next speech chunk
+      // Still an incomplete thought / sentence fragment, wait briefly for next speech chunk
       buf.timer = setTimeout(() => {
         this.evaluateBuffer(sessionId);
-      }, 2800);
+      }, 900);
       return;
     }
 

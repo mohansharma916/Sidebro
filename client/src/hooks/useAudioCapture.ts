@@ -43,10 +43,10 @@ function blobToBase64(blob: Blob): Promise<string> {
 // Voice-activity segmentation: a segment ends after a pause in speech instead of at a fixed
 // interval, so words and sentences are not cut in half between Whisper requests.
 const SPEECH_THRESHOLD = 0.024;      // speech typically exceeds 0.024; ambient noise stays below ~0.018
-const SILENCE_END_MS = 700;          // pause length that ends an utterance
-const MIN_SEGMENT_MS = 1000;
-const MAX_SEGMENT_MS = 10000;        // hard cap for long monologues
-const IDLE_SEGMENT_MS = 3000;        // recycle silent segments so they never grow large
+const SILENCE_END_MS = 550;          // fast pause length that cleanly ends an utterance
+const MIN_SEGMENT_MS = 800;          // minimum audio segment length
+const MAX_SEGMENT_MS = 8000;         // hard cap for long monologues
+const IDLE_SEGMENT_MS = 2500;        // recycle silent segments so they never grow large
 
 /**
  * Continuous Segment Recorder that records one standalone file per utterance.

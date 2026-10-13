@@ -215,7 +215,29 @@ export function App() {
         const { answerId, token } = msg.payload as { answerId: string; token: string };
         setCurrentAnswer(prev => {
           if (!prev || prev.id !== answerId) return prev;
-          return { ...prev, fullContent: (prev.fullContent || '') + token };
+          const fullContent = (prev.fullContent || '') + token;
+
+          // Progressive directAnswer extraction for instantaneous UI rendering
+          let directAnswer = prev.directAnswer;
+          const directMatch = fullContent.match(/### Direct Answer\s*\n([\s\S]*?)(?=\n###|$)/i);
+          if (directMatch && directMatch[1].trim()) {
+            directAnswer = directMatch[1].trim();
+          }
+
+          // Progressive keyPoints extraction as bullets stream in
+          let keyPoints = prev.keyPoints;
+          const keyPointsMatch = fullContent.match(/### Key Points\s*\n([\s\S]*?)(?=\n###|$)/i);
+          if (keyPointsMatch && keyPointsMatch[1].trim()) {
+            const extracted = keyPointsMatch[1]
+              .split('\n')
+              .map(l => l.trim())
+              .filter(l => l.startsWith('•') || l.startsWith('-') || l.startsWith('*'))
+              .map(l => l.replace(/^[•\-\*]\s*/, '').trim())
+              .filter(Boolean);
+            if (extracted.length > 0) keyPoints = extracted;
+          }
+
+          return { ...prev, fullContent, directAnswer, keyPoints };
         });
         break;
       }
