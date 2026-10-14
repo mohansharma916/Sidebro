@@ -10,7 +10,7 @@ export class NetworkService {
   }
 
   public getLocalIp(): string {
-    return this.localIp;
+    return this.detectLocalIp();
   }
 
   private detectLocalIp(): string {

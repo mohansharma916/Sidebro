@@ -19,10 +19,18 @@ export const QRCodeDisplay: React.FC<QRCodeDisplayProps> = ({
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
   const [copied, setCopied] = useState(false);
 
-  // Compute pairing URL (works locally or across WiFi network)
-  const host = localIp && localIp !== 'localhost' ? localIp : window.location.hostname;
+  // Helper to determine if an IP is a local loopback
+  const isLoopback = (h?: string) =>
+    !h || h === 'localhost' || h === '127.0.0.1' || h === '0.0.0.0' || h === '::1';
+
+  // Compute pairing URL (prioritize real Wi-Fi/LAN IP over loopback so mobile phones can connect)
+  const host = !isLoopback(localIp)
+    ? localIp!
+    : (!isLoopback(window.location.hostname) ? window.location.hostname : '127.0.0.1');
+
   const port = window.location.port ? `:${window.location.port}` : '';
   const pairingUrl = `${window.location.protocol}//${host}${port}/?join=${sessionCode}`;
+  const isLocalhostWarning = isLoopback(host);
 
   useEffect(() => {
     if (!pairingUrl) return;
@@ -82,6 +90,36 @@ export const QRCodeDisplay: React.FC<QRCodeDisplayProps> = ({
             Generating QR...
           </div>
         )}
+      </div>
+
+      {/* Warning if QR uses localhost/127.0.0.1 */}
+      {isLocalhostWarning && (
+        <div style={{
+          background: 'rgba(239, 68, 68, 0.12)',
+          border: '1px solid rgba(239, 68, 68, 0.3)',
+          borderRadius: '8px',
+          padding: '8px 12px',
+          marginBottom: '14px',
+          fontSize: '0.74rem',
+          color: '#fca5a5',
+          lineHeight: 1.4,
+          textAlign: 'left',
+        }}>
+          ⚠️ <strong>Localhost (127.0.0.1) detected:</strong> Mobile devices cannot reach <code>127.0.0.1</code>. Connect your computer to Wi-Fi so your phone can reach it via your local network.
+        </div>
+      )}
+
+      {/* Target URL Info */}
+      <div style={{
+        fontSize: '0.72rem',
+        color: '#64748b',
+        wordBreak: 'break-all',
+        marginBottom: '12px',
+        padding: '4px 8px',
+        background: 'rgba(0, 0, 0, 0.2)',
+        borderRadius: '6px',
+      }}>
+        <code>{pairingUrl}</code>
       </div>
 
       {/* 6-Character Session Code Display */}

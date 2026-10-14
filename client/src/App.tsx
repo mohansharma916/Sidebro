@@ -53,13 +53,34 @@ export function App() {
 
   // Fetch Network Info (LAN IP for QR scanning from mobile)
   useEffect(() => {
-    fetch('/api/network')
-      .then(res => res.json())
-      .then(data => {
-        if (data.localIp) setLocalIp(data.localIp);
-      })
-      .catch(() => {});
-  }, []);
+    let active = true;
+    const isLoopback = (ip?: string) => !ip || ip === '127.0.0.1' || ip === 'localhost';
+
+    const checkNetwork = () => {
+      fetch('/api/network')
+        .then(res => res.json())
+        .then(data => {
+          if (!active) return;
+          if (data.localIp) {
+            setLocalIp(data.localIp);
+          }
+        })
+        .catch(() => {});
+    };
+
+    checkNetwork();
+    // Poll every 3 seconds if IP is loopback or not yet loaded, so QR updates automatically when backend/Wi-Fi is ready
+    const interval = setInterval(() => {
+      if (isLoopback(localIp)) {
+        checkNetwork();
+      }
+    }, 3000);
+
+    return () => {
+      active = false;
+      clearInterval(interval);
+    };
+  }, [localIp]);
 
   // Parse Query Parameters on load
   useEffect(() => {
