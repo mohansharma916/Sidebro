@@ -6,6 +6,26 @@ let isFloatingMode = false;
 let savedBounds = null;
 let isContentProtected = true;
 
+// Only one instance may run: a second copy sharing the same profile directory loads a page that
+// never talks to the backend (clicks like "Start SideBro Session" silently do nothing).
+// A repeated launch focuses the existing window instead.
+const hasInstanceLock = app.requestSingleInstanceLock();
+if (!hasInstanceLock) {
+  console.log('[Electron] SideBro is already running; focusing the existing window.');
+  app.quit();
+} else {
+  app.on('second-instance', () => {
+    // On macOS closing the window keeps the app alive, so a relaunch must reopen it
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      if (app.isReady()) createWindow();
+      return;
+    }
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  });
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 960,
@@ -220,6 +240,7 @@ ipcMain.handle('set-window-opacity', async (event, opacity) => {
 
 
 app.whenReady().then(async () => {
+  if (!hasInstanceLock) return;
   // Explicitly allow microphone and screen media permissions for the web renderer
   if (session && session.defaultSession) {
     // Only grant permissions to the app's own pages (dev server or local backend), never to other origins.
@@ -256,17 +277,16 @@ app.whenReady().then(async () => {
     }
   }
 
-  // Request microphone permission on macOS
-  if (process.platform === 'darwin') {
-    try {
-      const micStatus = await systemPreferences.askForMediaAccess('microphone');
-      console.log('[Electron] Microphone access granted:', micStatus);
-    } catch (e) {
-      console.warn('[Electron] Could not check media access:', e);
-    }
-  }
-
   createWindow();
+
+  // Request microphone permission on macOS without blocking the window: awaiting it before
+  // createWindow left the app windowless while the system prompt was pending or hidden.
+  if (process.platform === 'darwin') {
+    console.log('[Electron] Microphone permission status:', systemPreferences.getMediaAccessStatus('microphone'));
+    systemPreferences.askForMediaAccess('microphone')
+      .then(micStatus => console.log('[Electron] Microphone access granted:', micStatus))
+      .catch(e => console.warn('[Electron] Could not check media access:', e));
+  }
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();

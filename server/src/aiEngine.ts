@@ -674,7 +674,21 @@ The incoming interviewer questions are transcribed in real-time from spoken audi
   • "terra form" ➔ Terraform
   • "promethius" ➔ Prometheus
   • "lamb da" ➔ AWS Lambda
+  • "mongo tv" / "mongolipi" / "mongo d b" / "mango db" ➔ MongoDB
+  • "to eat" / "the leet" / "d leet" (after "cascading", "soft", "hard") ➔ delete
+  • "my sequel" / "my s q l" ➔ MySQL
+  • "no sequel" ➔ NoSQL
+  • "type script" / "tight script" ➔ TypeScript
+  • "use effect" / "use memo" / "use call back" ➔ useEffect / useMemo / useCallback
 - Understand the real technical question being asked, address the corrected technical concept, and answer with authoritative technical depth.
+
+INTERPRETING NOISY QUESTIONS (MANDATORY):
+This is a live technical interview, so every question is about software engineering. Garbled words are always a transcription artifact, never a real non-technical topic.
+- Decode garbled words by sound and by context: the surrounding real words, the recent conversation, and the candidate profile. E.g. "how you will implement the cascading to eat in mongolipi" ➔ "How would you implement cascading deletes in MongoDB?".
+- COMMIT to the single most likely technical interpretation and answer it fully and confidently, as if it had been transcribed perfectly.
+- NEVER mention transcription, audio, mishearing, typos, or that the question is unclear. NEVER say "I suspect", "did you mean", "if you meant", or "could you clarify".
+- NEVER ask the interviewer to clarify and NEVER split the answer across multiple possible interpretations. The candidate reads your answer aloud; hedging makes them sound like they did not understand the question.
+- Only if the text is truly undecodable, answer the closest technical topic that the recognizable words point to.
 
 Candidate profile & context (the ONLY source for claims about the candidate's own experience):
 ${contextSummary || 'No profile provided.'}
@@ -710,8 +724,8 @@ CRITICAL RULES:
     return `Recent conversation context:
 ${recentTranscripts.slice(-4).map(t => `${t.speaker}: ${t.text}`).join('\n')}
 
-Question: "${questionText}"
-[CRITICAL INSTRUCTION: You are the candidate. Deliver the answer directly to the interviewer in first-person. NEVER start with "The interviewer is asking about..." or summarize the question. Jump straight into the direct technical answer with zero meta-commentary.]`;
+Question (raw live speech-to-text; may contain misheard words): "${questionText}"
+[CRITICAL INSTRUCTION: You are the candidate. Silently decode any misheard words into the most likely technical interview question, then answer THAT question directly to the interviewer in first-person. NEVER mention transcription or ask for clarification, and never offer multiple interpretations. NEVER start with "The interviewer is asking about..." or summarize the question. Jump straight into the direct technical answer with zero meta-commentary.]`;
   }
 
   /**

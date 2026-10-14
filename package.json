@@ -18,10 +18,10 @@
     "docker:build": "docker compose build",
     "docker:up": "HOST_IP=${HOST_IP:-$(ipconfig getifaddr en0 2>/dev/null)} docker compose up -d --build",
     "docker:down": "docker compose down",
-    "electron": "electron ./electron/main.cjs",
-    "dev:electron": "concurrently -n \"SERVERS,ELECTRON\" -c \"cyan,green\" \"npm run dev\" \"electron ./electron/main.cjs\"",
+    "electron": "env -u ELECTRON_RUN_AS_NODE electron ./electron/main.cjs",
+    "dev:electron": "concurrently -n \"SERVERS,ELECTRON\" -c \"cyan,green\" \"npm run dev\" \"env -u ELECTRON_RUN_AS_NODE electron ./electron/main.cjs\"",
     "docker:logs": "docker compose logs -f sidebro",
-    "electron:docker": "PORT=${SIDEBRO_PORT:-3001} electron ./electron/main.cjs"
+    "electron:docker": "env -u ELECTRON_RUN_AS_NODE PORT=${SIDEBRO_PORT:-3001} electron ./electron/main.cjs"
   },
   "keywords": [
     "realtime",
