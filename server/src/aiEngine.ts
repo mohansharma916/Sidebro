@@ -293,12 +293,12 @@ export class AIEngine {
 
     // 1. React Fiber & Reconciliation
     if (qLower.includes('fiber') || (qLower.includes('react') && qLower.includes('reconciliation'))) {
-      const direct = "React Fiber is React's complete rewrite of the reconciliation algorithm that introduces interruptible rendering, priority-based updates, and concurrent scheduling to prevent UI frame drops.";
+      const direct = "At a high level, the big reason React introduced Fiber was to prevent UI lag. In earlier React, rendering was synchronous and recursive, so a big component tree could lock the main thread. Fiber breaks work into small, interruptible units so React can pause, let user clicks or typing through immediately, and resume without dropping frames.";
       const points = [
-        "**Interruptible Rendering**: Divides rendering work into small units (fibers) that can yield execution to the browser event loop for high-priority inputs (e.g., typing, animations).",
-        "**Two-Phase Architecture**: Render/Reconciliation phase (pure, async, can be paused/aborted) vs. Commit phase (synchronous DOM mutations).",
-        "**Priority-Based Scheduling**: Uses Lane-based scheduler to assign priorities (e.g. Immediate, UserBlocking, Normal, Low, Idle).",
-        "**Double Buffering**: Maintains current fiber tree (visible on screen) and workInProgress fiber tree (in-memory clone being computed), swapping root pointers upon commit."
+        "Pause and resume: It splits the tree into lightweight fiber units and yields back to the browser event loop whenever high-priority input like typing or animations comes in.",
+        "Two-phase workflow: It does the heavy reconciliation asynchronously in the render phase where it can pause or discard work, and then commits actual DOM updates synchronously in one fast swipe.",
+        "Priority scheduling: It uses lanes to ensure urgent keystrokes get handled right away, while deferring background data fetching or transitions.",
+        "Double buffering: It keeps the current UI active on screen while quietly computing the next tree in memory, swapping root pointers as soon as it's ready."
       ];
       const snippet = `// Conceptual Fiber Node structure
 interface FiberNode {
@@ -314,8 +314,8 @@ interface FiberNode {
   alternate: FiberNode | null; // Double-buffering partner
 }`;
       const followUps = [
-        "How do React 18 Transitions (useTransition) utilize Fiber lanes?",
-        "What is the difference between the Render phase and Commit phase in Fiber?",
+        "How do React 18 transitions (useTransition) utilize Fiber lanes under the hood?",
+        "What's the practical difference between the Render phase and Commit phase in daily debugging?",
         "How does Fiber handle error boundaries during reconciliation?"
       ];
 
@@ -324,12 +324,12 @@ interface FiberNode {
 
     // 2. React Native Bridge vs JSI (JavaScript Interface)
     if (qLower.includes('jsi') || (qLower.includes('bridge') && qLower.includes('react native'))) {
-      const direct = "JSI (JavaScript Interface) is a lightweight C++ interface that enables direct, synchronous, and asynchronous memory references between JavaScript (Hermes/V8) and native C++/Java/Objective-C code, eliminating the JSON serialization overhead of the legacy Bridge.";
+      const direct = "The old React Native bridge had to serialize every single call into JSON and send it over an async message queue, which created noticeable stutter during fast gestures or animations. JSI fixes this by letting JavaScript hold direct C++ memory references, so JS can call native methods synchronously with zero JSON serialization overhead.";
       const points = [
-        "**No JSON Serialization Overhead**: Legacy Bridge serialized every call to JSON strings over an async queue; JSI exposes HostObjects directly in JS global memory.",
-        "**Synchronous Invocation**: JS can call native methods synchronously and receive returned values immediately (critical for Bluetooth, crypto, UI gestures).",
-        "**TurboModules & Fabric**: TurboModules use JSI to lazy-load native modules on demand; Fabric uses JSI for direct C++ DOM shadow tree manipulation.",
-        "**Engine Agnostic**: JSI abstracts the JavaScript engine, allowing seamless swaps between Hermes, V8, or JavaScriptCore."
+        "Direct memory access: JavaScript engines like Hermes can access native C++ objects directly through HostObjects, completely eliminating the JSON serialization bottleneck.",
+        "Synchronous when needed: For things that require instantaneous responses—like Bluetooth packets, crypto calculations, or gesture responders—you get immediate return values without async round trips.",
+        "Foundation of the new architecture: Both TurboModules (lazy-loading native code on demand) and Fabric (direct native UI rendering) are built on top of JSI.",
+        "Engine flexibility: Because JSI provides a clean abstraction layer, you can swap between Hermes, V8, or JavaScriptCore without changing your native binding code."
       ];
       const snippet = `// C++ JSI HostObject binding example
 class FastCryptoModule : public jsi::HostObject {
@@ -349,22 +349,22 @@ public:
   }
 };`;
       const followUps = [
-        "Why are TurboModules faster to initialize than legacy NativeModules?",
+        "Why do TurboModules initialize so much faster than legacy NativeModules?",
         "How does Fabric use JSI to avoid layout thrashing across threads?",
-        "What are the safety concerns when calling synchronous native functions in JSI?"
+        "What safety concerns should you watch out for when calling synchronous native functions via JSI?"
       ];
 
       return this.formatAnswer(direct, points, snippet, followUps, lengthMode, modifier);
     }
 
-    // 3. Mobile list / rendering performance (conceptual techniques, no invented results)
+    // 3. Mobile list / rendering performance
     if (qLower.includes('flatlist') || (qLower.includes('performance') && (qLower.includes('react') || qLower.includes('mobile') || qLower.includes('list')))) {
-      const direct = "Typical levers for React / React Native performance are list virtualization with view recycling, avoiding unnecessary re-renders, and moving heavy work off the JS thread. Back any claim with numbers from your own projects.";
+      const direct = "When optimizing list or UI performance in React Native, the biggest wins usually come from list virtualization with view recycling, stopping unnecessary component re-renders, and getting heavy calculations off the JavaScript thread. I always profile first to target actual bottlenecks rather than guessing.";
       const points = [
-        "**View Recycling**: Recycling lists (e.g. FlashList) reuse native cells instead of creating and destroying views during fast scrolls.",
-        "**Render Optimization**: `React.memo`, stable callbacks (`useCallback`) and smaller state slices stop cascading re-renders.",
-        "**Off-Thread Work**: Move large data transforms or hashing to background threads (JSI modules, workers) so the UI thread keeps 60 FPS.",
-        "**Measure First**: Profile with Flipper / React DevTools / platform profilers and track FPS, JS frame time and TTI before and after."
+        "Recycle native views: Using modern virtualized lists like FlashList reuses existing native cells rather than allocating and destroying views on rapid scroll.",
+        "Tame re-renders: Keep state as local as possible, memoize expensive calculations with useMemo, and make sure stable callbacks don't cause cascading re-renders down the tree.",
+        "Offload the JS thread: Move heavy data parsing, image transforms, or crypto over to background threads or native modules so the UI thread stays pinned at 60 FPS.",
+        "Measure with real tools: Profile with React DevTools, Flipper, or platform profilers to inspect JS frame time and track where dropped frames actually happen."
       ];
       const snippet = `// Virtualized list configuration
 <FlashList
@@ -374,9 +374,9 @@ public:
   keyExtractor={item => item.id}
 />`;
       const followUps = [
-        "How do you profile memory leaks on iOS and Android?",
-        "Which performance metrics do you track in production?",
-        "How do you keep nested scroll views smooth?"
+        "How do you profile memory leaks and image caches on iOS and Android?",
+        "Which performance metrics do you track in production to monitor real-user experience?",
+        "How do you keep nested scroll views smooth without gesture conflicts?"
       ];
 
       return this.formatAnswer(direct, points, snippet, followUps, lengthMode, modifier);
@@ -386,31 +386,31 @@ public:
     if (category === 'Behavioral' || /\btell me about a time\b|\bdescribe a (situation|time)\b|\bbiggest challenge\b/.test(qLower)) {
       const ownNotes = context.find(c => c.source === 'projectNotes') || context[0];
       const direct = ownNotes
-        ? `Answer with a real example from your own experience. Closest match in your profile: "${ownNotes.content.slice(0, 160)}${ownNotes.content.length > 160 ? '…' : ''}"`
-        : "Answer with a real example from your own experience using the STAR structure. Add project notes to your profile to get a suggested example here.";
+        ? `When answering this, speak naturally about a real project from your background. A great starting point from your profile: "${ownNotes.content.slice(0, 160)}${ownNotes.content.length > 160 ? '…' : ''}"`
+        : "Walk through a real situation from your own experience. Keep the setup concise and focus most of your time on the concrete engineering decisions you personally drove.";
       const points = [
-        "**Situation (S)**: One or two sentences of context: team, system, stakes.",
-        "**Task (T)**: What you specifically were responsible for.",
-        "**Action (A)**: The concrete steps *you* took and why; this should be most of the answer.",
-        "**Result (R)**: Measurable outcome and what you learned or changed afterwards."
+        "Set the scene quickly: One or two sentences on the team context, the problem, and why it was urgent or high-stakes.",
+        "Your specific role: Clearly state what you personally owned versus what the rest of the team did.",
+        "Concrete actions and trade-offs: Walk through the key technical decisions you made, the obstacles you ran into, and how you solved them.",
+        "The impact and reflection: Share the measurable result, what shipped to users, and what you took away from the experience."
       ];
       const followUps = [
-        "What would you do differently next time?",
-        "How did you communicate with stakeholders during this?",
-        "What was the hardest trade-off you had to make?"
+        "What would you do differently if you tackled that project again today?",
+        "How did you keep stakeholders and cross-functional teams aligned during the process?",
+        "What was the toughest engineering trade-off you had to defend?"
       ];
 
       return this.formatAnswer(direct, points, undefined, followUps, lengthMode, modifier);
     }
 
-    // 5. Idempotency & Reliable API Design (PRD §39)
+    // 5. Idempotency & Reliable API Design
     if (qLower.includes('idempot') || qLower.includes('retry') || qLower.includes('duplicate request')) {
-      const direct = "Idempotency ensures that an API operation can be repeated multiple times without changing the result beyond the initial application, critical for safe retries in network failures and payment processing.";
+      const direct = "At its core, idempotency is about making retries completely safe. If a client experiences a network timeout and fires the same payment or order request three times, an idempotent system guarantees the charge only executes once and returns the exact same successful result every time.";
       const points = [
-        "**Idempotency-Key Header**: Clients attach a unique UUID (`Idempotency-Key`) to mutate requests (POST/PATCH).",
-        "**Atomic Lock & Deduplication**: The API gateway acquires a distributed lock in Redis for the key; if in-flight, it rejects concurrent duplicates with HTTP 409 or waits.",
-        "**Persisted Response Cache**: Once the business transaction succeeds, cache the HTTP status and response payload with a TTL (e.g. 24h) keyed by `userId + idempotencyKey`.",
-        "**HTTP Verb Guarantees**: GET, PUT, DELETE are idempotent by HTTP RFC spec; POST is non-idempotent by default and requires explicit application-level idempotency tokens."
+        "Client idempotency key: The client generates a unique UUID with any mutating request and sends it in an Idempotency-Key header.",
+        "Atomic distributed lock: When the request hits the gateway, we acquire a fast Redis lock on that key. If a duplicate retry arrives while the first request is still running, it holds or returns a 409 conflict.",
+        "Cache the final response: Once the database transaction commits, we store the HTTP status code and response payload with a 24-hour TTL in Redis so duplicate retries return immediately without touching the database.",
+        "Safe HTTP verb semantics: GET, PUT, and DELETE are naturally idempotent by HTTP spec; POST requires this explicit application-level idempotency key handling."
       ];
       const snippet = `// Express.js Idempotency Middleware pattern
 export async function idempotencyMiddleware(req: Request, res: Response, next: NextFunction) {
@@ -434,21 +434,21 @@ export async function idempotencyMiddleware(req: Request, res: Response, next: N
 }`;
       const followUps = [
         "How do you handle a request that is still processing when a duplicate retry arrives?",
-        "What is the difference between Idempotency and Deduplication?",
+        "What is the difference between Idempotency and Deduplication in distributed messaging?",
         "How does the Transactional Outbox pattern support idempotent downstream events?"
       ];
 
       return this.formatAnswer(direct, points, snippet, followUps, lengthMode, modifier);
     }
 
-    // 6. Distributed Rate Limiter (Only when question specifically asks about rate limiting)
+    // 6. Distributed Rate Limiter
     if (qLower.includes('rate limit') || qLower.includes('throttl')) {
-      const direct = "To design a distributed rate limiter, I would utilize a Redis cluster running Token Bucket or Sliding Window Log algorithms with local token-leaky in-memory tiering to handle 100k+ RPS with sub-millisecond overhead.";
+      const direct = "If I were designing a distributed rate limiter, I'd back our API gateways with a Redis cluster running a sliding window counter or token bucket so multiple gateway instances share an atomic count with sub-millisecond lookup overhead.";
       const points = [
-        "**Algorithm**: Sliding Window Counter in Redis (sorted sets or atomic Lua scripts with Redis INCR and EXPIRE).",
-        "**High Availability**: Multi-region Redis clusters with active-active replication; if Redis is unreachable, fail-open with local in-process token buckets to protect availability.",
-        "**Client Identification**: Composite key based on Authenticated User ID + Client IP + API Tier header.",
-        "**Headers & Feedback**: Return standard RFC headers: \`X-RateLimit-Limit\`, \`X-RateLimit-Remaining\`, and \`Retry-After\` on HTTP 429."
+        "Atomic sliding window in Redis: Running a small Lua script directly on Redis keeps the timestamp check and increment atomic, avoiding race conditions between gateway nodes.",
+        "Fail-open resilience: If the Redis cluster ever degrades or becomes unreachable, the gateways fail open with local in-memory fallback limits so a rate limiter hiccup never takes down the API.",
+        "Targeted client keys: For authenticated traffic, rate limit by user ID or account tier; for public unauthenticated endpoints, throttle by client IP and route.",
+        "Standard rate limit headers: Always return standard headers like X-RateLimit-Remaining and Retry-After on 429 status codes so well-behaved clients can back off smoothly."
       ];
       const snippet = `-- Redis Lua Script for Atomic Sliding Window Counter
 local key = KEYS[1]
@@ -469,62 +469,61 @@ else
 end`;
       const followUps = [
         "How do you handle race conditions between distributed rate limiter nodes?",
-        "What are the trade-offs between Token Bucket vs Leaky Bucket vs Sliding Window Log?",
-        "How would you implement tier-based rate limiting with payment plans?"
+        "What are the practical trade-offs between Token Bucket vs Leaky Bucket vs Sliding Window Log?",
+        "How would you implement tier-based rate limiting with dynamic subscription plans?"
       ];
 
       return this.formatAnswer(direct, points, snippet, followUps, lengthMode, modifier);
     }
 
-    // 7. General System Design (When asked about architecture, scaling, or distributed design)
+    // 7. General System Design
     if (category === 'System Design' || qLower.includes('design a') || qLower.includes('scale') || qLower.includes('architect')) {
-      const direct = `To design a resilient architecture for "${questionText.replace(/\?$/, '')}", I establish a decoupled microservices topology with API gateway routing, multi-tier caching (CDN + Redis), and asynchronous event streaming (Kafka) for linear horizontal scalability.`;
+      const direct = `For designing ${questionText.replace(/\?$/, '')}, the way I usually approach this is starting with expected traffic patterns and data volume, then decoupling the read path and write path with caching and message queues so each layer can scale independently without single points of failure.`;
       const points = [
-        "**Tiered Architecture**: Edge Cloudflare CDN for static/cachable responses → Kong/Envoy API Gateway with token authentication → Stateless Microservices on Kubernetes.",
-        "**Data Tiering & Partitioning**: Read-heavy replica pools with Redis caching layer; write paths partitioned by consistent hashing or tenant ID.",
-        "**Asynchronous Decoupling**: Offload non-blocking workflows to Apache Kafka / RabbitMQ with Dead Letter Queues (DLQ) for at-least-once delivery guarantees.",
-        "**Resilience & Observability**: Circuit breakers (Resilience4j), distributed tracing (OpenTelemetry/Jaeger), and automated auto-scaling triggers on CPU/RPS."
+        "Decoupled edge and stateless services: Put Cloudflare CDN in front for cacheable assets, route through an API gateway for auth, and keep app services completely stateless so they auto-scale easily.",
+        "Split read and write workloads: Put Redis in front of read replicas for high-frequency queries, and partition heavy write databases by tenant ID or consistent hashing.",
+        "Asynchronous event queues: Offload non-blocking workflows like notifications or analytics into Kafka or RabbitMQ with dead-letter queues so user-facing endpoints stay snappy.",
+        "Resilience and observability: Set up circuit breakers and distributed tracing with OpenTelemetry so when a third-party dependency degrades, the system degrades gracefully instead of cascading."
       ];
       const snippet = `// Conceptual Distributed System Gateway Architecture
 // Client -> Anycast CDN -> API Gateway -> Envoy Service Mesh -> Microservices
 // Write Path: Service -> Kafka Topic -> Consumer Worker -> Primary DB
 // Read Path:  Service -> Redis Cluster (Cache-Aside) -> Read Replica DB`;
       const followUps = [
-        "How do you handle data consistency across microservices (Saga pattern vs 2PC)?",
+        "How do you handle data consistency across microservices (Saga pattern vs 2-phase commit)?",
         "How would you partition the database as throughput increases by 10x?",
-        "What are the disaster recovery (DR) RPO and RTO targets for this system?"
+        "What are your disaster recovery RPO and RTO targets for this system?"
       ];
 
       return this.formatAnswer(direct, points, snippet, followUps, lengthMode, modifier);
     }
 
-    // 6. Coding question: a problem-solving checklist (a real solution needs an AI provider)
+    // 8. Coding question checklist
     if (category === 'Coding' || sessionType === 'coding' || /\b(algorithm|complexity|binary tree|linked list|dynamic programming|write a function|implement)\b/.test(qLower)) {
-      const direct = `Offline mode cannot write a solution for "${questionText.replace(/\?$/, '')}". Use this checklist to work through it out loud.`;
+      const direct = `Offline mode doesn't generate live code for "${questionText.replace(/\?$/, '')}". Here is how to speak through the solution step-by-step with the interviewer.`;
       const points = [
-        "**Clarify**: Restate the problem, confirm input size, constraints, and expected output with an example.",
-        "**Brute Force First**: State the simplest correct approach and its time/space complexity.",
-        "**Optimize**: Look for repeated work: hash maps, two pointers, sorting, sliding window, memoization.",
-        "**Edge Cases & Tests**: Empty input, single element, duplicates, very large values; walk through one test by hand."
+        "Clarify first: Restate the problem in your own words, confirm input boundaries and constraints, and walk through a quick example out loud.",
+        "State brute force: Mention the simple brute-force approach and its time/space complexity first—it shows you understand the baseline.",
+        "Explain your optimization: Point out where repeated work can be avoided using a hash map, two pointers, sliding window, or memoization.",
+        "Walk through test cases: Trace through the code with a normal input and highlight edge cases like null/empty arrays, duplicates, or extreme sizes."
       ];
       const followUps = [
-        "Can you improve the time or space complexity?",
-        "How would this change if the input did not fit in memory?",
-        "Which tests would you write for this function?"
+        "Can you improve the time or space complexity further?",
+        "How would this change if the input data did not fit in memory?",
+        "Which unit test cases would you write to verify edge cases?"
       ];
 
       return this.formatAnswer(direct, points, undefined, followUps, lengthMode, modifier);
     }
 
-    // 7. Generic / Fallback Technical Question
-    const direct = `No AI provider is configured, so there is no specific answer for "${questionText.replace(/\?$/, '')}". Structure your answer around the points below.`;
+    // 9. Generic / Fallback Technical Question
+    const direct = `The way I'd talk through "${questionText.replace(/\?$/, '')}" in an interview is to break it down into the core motivation, practical production trade-offs, and what usually breaks at scale.`;
     const points = [
-      `**Core Concept**: Leverage standard patterns and idiomatic conventions for ${category.toLowerCase()} architecture.`,
-      "**Trade-off Analysis**: Balance time complexity vs space complexity, latency vs throughput, and consistency vs availability.",
-      "**Production Readiness**: Ensure comprehensive unit test coverage, structured logging, distributed tracing, and graceful error boundaries.",
-      "**Practical Insight**: Ground solutions in real metrics, caching strategies, and resilient fallback states."
+      `Start with the real-world goal: explain why a team adopts this pattern and what problem it solves in day-to-day engineering.`,
+      "Highlight the trade-offs: contrast the pros and cons—like developer velocity vs complexity, or latency vs consistency.",
+      "Production reliability: talk through how you monitor it with metrics, handle graceful degradation, and set up error boundaries.",
+      "Edge cases and gotchas: point out common pitfalls or edge cases you've seen when scaling this up."
     ];
-    // No unrelated dummy code snippet for generic or conceptual questions
     const snippet = undefined;
     const followUps = [
       "What are the main edge cases and failure modes for this solution?",
@@ -560,9 +559,9 @@ end`;
       finalPoints = finalPoints.slice(0, 2);
       finalSnippet = undefined;
     } else if (modifier === 'technical_detail' || lengthMode === 'detailed') {
-      finalPoints.push("**Low-Level Nuance**: Memory layout, cache locality, and atomic operations ensure high concurrency safety.");
+      finalPoints.push("Under the hood: Memory layout, cache locality, and atomic operations ensure high concurrency safety without locks.");
     } else if (modifier === 'alternative') {
-      finalPoints.push("**Alternative Approach**: Contrast with event-driven asynchronous queues (Kafka/RabbitMQ) for batch vs immediate processing.");
+      finalPoints.push("Alternative consideration: Contrast this with an asynchronous event queue (like Kafka or RabbitMQ) if the system needs eventual consistency and batch processing.");
     }
 
     let fullMarkdown = `### Direct Answer\n${finalDirect}\n\n### Key Points\n`;
@@ -611,6 +610,22 @@ end`;
   private buildSystemPrompt(sessionType: SessionType, lengthMode: AnswerLengthMode, contextSummary: string, modifier: string | undefined): string {
     return `You are SideBro AI, an elite technical interview wingman assisting a candidate in a ${sessionType} technical interview.
 
+NATURAL HUMAN CONVERSATIONAL TONE VS TEXTBOOK DEFINITIONS (TOP PRIORITY):
+- Absolutely ZERO textbook, dictionary, or Wikipedia definitions.
+  • Interviewers immediately tune out candidates who sound like they are reciting an encyclopedia or exam study guide.
+  • WRONG (Textbook definition): "Redis is an open-source, in-memory data structure store used as a database, cache, message broker, and streaming engine that provides sub-millisecond response times..."
+  • RIGHT (Human engineer): "The way I look at Redis in our stack is as our fast in-memory tier. We mostly reach for it for sub-millisecond caching, session tokens, or atomic locks to keep heavy repeat queries off our Postgres database."
+  • WRONG (Textbook definition): "React Fiber is a reconciliation engine that maintains two trees to facilitate asynchronous rendering..."
+  • RIGHT (Human engineer): "At a high level, the big reason React introduced Fiber was to prevent UI lag. In older React, rendering was synchronous and recursive, so a big component tree could lock the main thread. Fiber breaks work into small, interruptible units so React can pause, let user clicks or typing through immediately, and resume without dropping frames."
+- SOUND LIKE AN EXPERIENCED COLLEAGUE DISCUSSING ARCHITECTURE OVER COFFEE:
+  • Warm, confident, grounded, and conversational.
+  • Jump into the Direct Answer with a natural conversational sentence:
+    - "The way I usually approach this is..."
+    - "At a high level, the core problem this solves is..."
+    - "In production, what we usually reach for is..."
+    - "The way I think about [Topic] is..."
+  • Avoid stiff academic jargon ("delineates", "aforementioned", "sub-millisecond overhead guarantees", "paradigm shift"). Speak in clear, natural engineering English that feels authentic and spoken.
+
 ROLE & HUMAN SPEAKING DELIVERY:
 You craft natural, spoken interview cues for a real candidate to say ALOUD to an interviewer.
 - YOU ARE THE CANDIDATE SPEAKING DIRECTLY TO THE INTERVIEWER:
@@ -622,13 +637,18 @@ You craft natural, spoken interview cues for a real candidate to say ALOUD to an
       * WRONG: "The interviewer is asking about the call, apply, and bind methods in JavaScript, which are used to..."
       * RIGHT: "Call, apply, and bind in JavaScript are used to explicitly bind the this context of a function. I use call and apply for immediate execution, and bind when I need to return a new function for later callback execution."
   • Real engineers say: "The way I approach this is...", "In production, what I usually reach for is...", "The main trade-off we balance is...", "A classic gotcha you hit at scale is...".
-  • NEVER give sterile dictionary definitions (e.g., do NOT say "Redis is an open-source in-memory data structure store...").
   • Focus on real production rationale: why an engineering team chooses it, how it actually behaves under load, and how you use it day-to-day.
   • NO robotic throat-clearing preambles: never say "Sure, I can explain that", "That's a great question", or "In conclusion".
 
 FORMATTING & STYLING RULES (STRICT):
 - DO NOT clutter the answer with markdown asterisks (**). Avoid double-asterisk spam.
-- Write clean, conversational text without wrapping every title or phrase in asterisks (**). Keep it clean so it reads like human spoken notes on a teleprompter.
+- In Key Points, NEVER use bold concept headers like "**Definition**:", "**Architecture**:", "**Trade-off Analysis**:", or "**Mechanisms**:".
+- Each bullet point must be a clean spoken talking point that flows naturally when read aloud:
+  * WRONG: "• **Interruptible Rendering**: Divides rendering work into small units (fibers) that yield..."
+  * RIGHT: "• It pauses and resumes: instead of locking the thread with one giant pass, it yields back to the browser event loop whenever high-priority user interactions come in."
+  * WRONG: "• **Trade-off Analysis**: Balance time complexity vs space complexity..."
+  * RIGHT: "• On trade-offs: you're trading memory for latency here—caching precomputed aggregates in memory saves heavy SQL joins at the expense of cache invalidation complexity."
+- Write clean, conversational text that reads like human spoken notes on a teleprompter.
 
 HUMAN SENIOR INTERVIEW ANSWERING FRAMEWORK:
 1. Direct Spoken Lead:
@@ -706,9 +726,9 @@ CRITICAL RULES:
 [1-2 clear, conversational sentences spoken naturally in first-person as an experienced engineer]
 
 ### Key Points
-• [Core architectural mechanism and how it works under the hood, in plain spoken language]
-• [Practical trade-offs, when you choose this vs alternatives]
-• [Real-world production gotchas, scale challenges, or edge cases to watch out for]
+• [First spoken talking point on how it works under the hood, in plain conversational language]
+• [Second spoken talking point on practical trade-offs when choosing this vs alternatives]
+• [Third spoken talking point on real-world production gotchas or edge cases to watch out for]
 
 ### Code / Implementation Blueprint (ONLY if code was asked for)
 \`\`\`[language]
@@ -725,7 +745,8 @@ CRITICAL RULES:
 ${recentTranscripts.slice(-4).map(t => `${t.speaker}: ${t.text}`).join('\n')}
 
 Question (raw live speech-to-text; may contain misheard words): "${questionText}"
-[CRITICAL INSTRUCTION: You are the candidate. Silently decode any misheard words into the most likely technical interview question, then answer THAT question directly to the interviewer in first-person. NEVER mention transcription or ask for clarification, and never offer multiple interpretations. NEVER start with "The interviewer is asking about..." or summarize the question. Jump straight into the direct technical answer with zero meta-commentary.]`;
+[CRITICAL INSTRUCTION: You are the candidate speaking aloud in the interview. Silently decode any misheard words into the most likely technical interview question, then answer THAT question directly to the interviewer in first-person.
+Speak in a natural, human conversational tone like an experienced senior engineer—zero textbook definitions, zero robotic labels, and zero third-person commentary. Jump straight into the direct answer.]`;
   }
 
   /**
@@ -775,7 +796,7 @@ Question (raw live speech-to-text; may contain misheard words): "${questionText}
         body: JSON.stringify({
           systemInstruction: { parts: [{ text: this.buildSystemPrompt(sessionType, lengthMode, contextSummary, modifier) }] },
           contents: [{ role: 'user', parts: [{ text: this.buildUserPrompt(questionText, recentTranscripts) }] }],
-          generationConfig: { temperature: 0.3, maxOutputTokens: lengthMode === 'quick' ? 400 : 1100 },
+          generationConfig: { temperature: 0.65, maxOutputTokens: lengthMode === 'quick' ? 400 : 1100 },
         }),
         signal,
       }
@@ -822,7 +843,7 @@ Question (raw live speech-to-text; may contain misheard words): "${questionText}
           { role: 'system', content: this.buildSystemPrompt(sessionType, lengthMode, contextSummary, modifier) },
           { role: 'user', content: this.buildUserPrompt(questionText, recentTranscripts) },
         ],
-        temperature: 0.2,
+        temperature: 0.65,
         max_tokens: lengthMode === 'quick' ? 300 : lengthMode === 'detailed' ? 850 : 550,
         stream: true,
       }),
@@ -872,7 +893,7 @@ Question (raw live speech-to-text; may contain misheard words): "${questionText}
           { role: 'system', content: this.buildSystemPrompt(sessionType, lengthMode, contextSummary, modifier) },
           { role: 'user', content: this.buildUserPrompt(questionText, recentTranscripts) },
         ],
-        temperature: 0.2,
+        temperature: 0.65,
         max_tokens: lengthMode === 'quick' ? 300 : lengthMode === 'detailed' ? 850 : 550,
         stream: true,
       }),
