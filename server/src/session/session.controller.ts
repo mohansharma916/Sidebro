@@ -31,6 +31,9 @@ import { SessionState } from '../types.js';
 
 /** Base64 of ~30 s of compressed audio is far below this. */
 const MAX_AUDIO_BASE64_CHARS = 4 * 1024 * 1024;
+/** A downscaled JPEG screenshot is a few hundred KB; the cap stays under the 6 MB body limit. */
+const MAX_IMAGE_BASE64_CHARS = 5 * 1024 * 1024;
+const IMAGE_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp'] as const;
 
 function unwrap<T>(result: OpResult<T>): T {
   if (result.ok) return result.value;
@@ -226,6 +229,31 @@ export class SessionController {
     const question = unwrap(
       this.sessionGateway.askQuestion(id, body?.questionText, oneOf(body?.category, QUESTION_CATEGORIES))
     );
+    return { success: true, question };
+  }
+
+  /** Solves a coding problem the user copied (meeting chat, problem page, editor). */
+  @Post(':id/solve/clipboard')
+  @UseGuards(SessionTokenGuard)
+  solveFromClipboard(@Param('id') id: string, @Body() body: Record<string, unknown>) {
+    const text = typeof body?.text === 'string' ? body.text : '';
+    const question = unwrap(this.sessionGateway.solveCoding(id, 'clipboard', { kind: 'text', text }));
+    return { success: true, question };
+  }
+
+  /** Solves the coding problem visible in a screenshot. The image is used once and never stored. */
+  @Post(':id/solve/screenshot')
+  @UseGuards(SessionTokenGuard)
+  solveFromScreenshot(@Param('id') id: string, @Body() body: Record<string, unknown>) {
+    const imageBase64 = body?.imageBase64;
+    if (typeof imageBase64 !== 'string' || !imageBase64) {
+      throw new BadRequestException('imageBase64 is required');
+    }
+    if (imageBase64.length > MAX_IMAGE_BASE64_CHARS) {
+      throw new BadRequestException('Screenshot too large');
+    }
+    const mimeType = oneOf(body.mimeType, IMAGE_MIME_TYPES) || 'image/jpeg';
+    const question = unwrap(this.sessionGateway.solveCoding(id, 'screen', { kind: 'image', base64: imageBase64, mimeType }));
     return { success: true, question };
   }
 

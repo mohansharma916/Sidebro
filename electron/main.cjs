@@ -1,10 +1,27 @@
-const { app, BrowserWindow, ipcMain, systemPreferences, session, desktopCapturer } = require('electron');
+const { app, BrowserWindow, ipcMain, systemPreferences, session, desktopCapturer, clipboard, globalShortcut, screen } = require('electron');
 const path = require('path');
 
 let mainWindow = null;
 let isFloatingMode = false;
 let savedBounds = null;
 let isContentProtected = true;
+
+// Coding-problem capture: every text copy is offered to the renderer, and a global hotkey takes a
+// screenshot of the display under the cursor. Both run alongside the voice flow.
+const SCREENSHOT_HOTKEY = process.env.SIDEBRO_SCREENSHOT_HOTKEY || 'CommandOrControl+Alt+Shift+S';
+const CLIPBOARD_WATCH_ENABLED = process.env.SIDEBRO_CLIPBOARD_WATCH !== '0';
+const CLIPBOARD_POLL_MS = 400;
+const CLIPBOARD_MIN_CHARS = 20;
+const CLIPBOARD_MAX_CHARS = 12000;
+/** Wide enough to keep code legible, small enough to upload quickly. */
+const SCREENSHOT_MAX_WIDTH = 1920;
+
+// Parakeet-style overlay: a wide glass bar pinned top-center whose answer card collapses to just the bar.
+const OVERLAY_HIDE_HOTKEY = process.env.SIDEBRO_OVERLAY_HOTKEY || 'CommandOrControl+\\';
+const OVERLAY_WIDTH = 760;
+const OVERLAY_EXPANDED_HEIGHT = 540;
+const OVERLAY_COLLAPSED_HEIGHT = 56;
+let overlayExpandedHeight = OVERLAY_EXPANDED_HEIGHT;
 
 // Only one instance may run: a second copy sharing the same profile directory loads a page that
 // never talks to the backend (clicks like "Start SideBro Session" silently do nothing).
@@ -170,32 +187,118 @@ function createWindow() {
   });
 }
 
+/**
+ * Filters out copies that cannot be a coding question: short snippets, lone URLs, and single
+ * tokens (passwords, ids, keys), so they are never sent to the AI provider.
+ */
+function isWorthSolving(text) {
+  if (text.length < CLIPBOARD_MIN_CHARS || text.length > CLIPBOARD_MAX_CHARS) return false;
+  if (/^https?:\/\/\S+$/i.test(text)) return false;
+  return /\s/.test(text);
+}
+
+function startClipboardWatcher() {
+  // Whatever is on the clipboard at launch was copied before the interview; ignore it.
+  let lastText = clipboard.readText();
+  setInterval(() => {
+    const text = clipboard.readText();
+    if (text === lastText) return;
+    lastText = text;
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    // Copies made inside SideBro itself (e.g. the "Copy" answer button) are not new questions.
+    if (mainWindow.isFocused()) return;
+    const trimmed = text.trim();
+    if (!isWorthSolving(trimmed)) return;
+    mainWindow.webContents.send('clipboard-copied', { text: trimmed });
+  }, CLIPBOARD_POLL_MS);
+}
+
+/** Captures the display under the cursor and hands a downscaled JPEG to the renderer. */
+async function captureScreenshot() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  try {
+    if (process.platform === 'darwin' && systemPreferences.getMediaAccessStatus('screen') === 'denied') {
+      throw new Error('Screen Recording permission is off. Enable SideBro (or Electron) in System Settings > Privacy & Security > Screen Recording, then restart the app.');
+    }
+    const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+    const scale = display.scaleFactor || 1;
+    const sources = await desktopCapturer.getSources({
+      types: ['screen'],
+      thumbnailSize: { width: Math.round(display.size.width * scale), height: Math.round(display.size.height * scale) },
+    });
+    const source = sources.find(s => s.display_id === String(display.id)) || sources[0];
+    let image = source?.thumbnail;
+    if (!image || image.isEmpty()) {
+      throw new Error('Screenshot came back empty. Check the Screen Recording permission for SideBro in System Settings.');
+    }
+    if (image.getSize().width > SCREENSHOT_MAX_WIDTH) {
+      image = image.resize({ width: SCREENSHOT_MAX_WIDTH, quality: 'best' });
+    }
+    mainWindow.webContents.send('screenshot-captured', {
+      imageBase64: image.toJPEG(80).toString('base64'),
+      mimeType: 'image/jpeg',
+    });
+  } catch (err) {
+    console.warn('[Electron] Screenshot failed:', err.message);
+    mainWindow.webContents.send('screenshot-error', { message: err.message });
+  }
+}
+
+ipcMain.handle('capture-screenshot', async () => {
+  await captureScreenshot();
+  return true;
+});
+
+/** Frosted-glass chrome for the overlay on macOS: native vibrancy, no traffic lights. */
+function setOverlayChrome(enabled) {
+  if (process.platform !== 'darwin' || !mainWindow) return;
+  mainWindow.setWindowButtonVisibility(!enabled);
+  mainWindow.setVibrancy(enabled ? 'hud' : null);
+  mainWindow.setBackgroundColor(enabled ? '#00000000' : '#0a0d14');
+}
+
+/** Panic hide: toggles the overlay without taking focus away from the meeting app. */
+function toggleOverlayVisibility() {
+  if (!mainWindow || mainWindow.isDestroyed() || !isFloatingMode) return;
+  if (mainWindow.isVisible()) mainWindow.hide();
+  else mainWindow.showInactive();
+}
+
 // Parakeet AI-style Floating Window & Anti-Screen-Share Protection IPC Handlers
 ipcMain.handle('toggle-floating-mode', async (event, requestedState) => {
   if (!mainWindow) return { isFloating: false, isProtected: isContentProtected };
   const target = requestedState !== undefined ? Boolean(requestedState) : !isFloatingMode;
+  // Re-entering would overwrite savedBounds with the overlay's own bounds
+  if (target === isFloatingMode) return { isFloating: isFloatingMode, isProtected: isContentProtected };
   isFloatingMode = target;
 
   if (isFloatingMode) {
     savedBounds = mainWindow.getBounds();
-    const { screen } = require('electron');
     const display = screen.getDisplayMatching(savedBounds) || screen.getPrimaryDisplay();
     const { x, y, width: screenWidth, height: screenHeight } = display.workArea;
-    const floatWidth = 440;
-    const floatHeight = Math.min(680, screenHeight - 60);
-    const posX = x + screenWidth - floatWidth - 24;
-    const posY = y + 40;
+    const floatWidth = Math.min(OVERLAY_WIDTH, screenWidth - 32);
+    overlayExpandedHeight = Math.min(OVERLAY_EXPANDED_HEIGHT, screenHeight - 40);
+    const posX = x + Math.round((screenWidth - floatWidth) / 2);
+    const posY = y + 12;
 
-    mainWindow.setMinimumSize(360, 380);
-    mainWindow.setBounds({ x: posX, y: posY, width: floatWidth, height: floatHeight });
+    mainWindow.setMinimumSize(480, OVERLAY_COLLAPSED_HEIGHT);
+    mainWindow.setBounds({ x: posX, y: posY, width: floatWidth, height: overlayExpandedHeight });
+    setOverlayChrome(true);
     mainWindow.setAlwaysOnTop(true, 'floating', 1);
     if (mainWindow.setVisibleOnAllWorkspaces) {
       mainWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
     }
     mainWindow.setContentProtection(true);
     isContentProtected = true;
+    if (!globalShortcut.register(OVERLAY_HIDE_HOTKEY, toggleOverlayVisibility)) {
+      console.warn(`[Electron] Could not register overlay hide hotkey ${OVERLAY_HIDE_HOTKEY}. Set SIDEBRO_OVERLAY_HOTKEY to pick another.`);
+    }
   } else {
+    if (globalShortcut.isRegistered(OVERLAY_HIDE_HOTKEY)) globalShortcut.unregister(OVERLAY_HIDE_HOTKEY);
+    if (!mainWindow.isVisible()) mainWindow.show();
+    setOverlayChrome(false);
     mainWindow.setAlwaysOnTop(false);
+    if (mainWindow.setVisibleOnAllWorkspaces) mainWindow.setVisibleOnAllWorkspaces(false);
     mainWindow.setMinimumSize(480, 520);
     if (savedBounds) {
       mainWindow.setBounds(savedBounds);
@@ -206,6 +309,16 @@ ipcMain.handle('toggle-floating-mode', async (event, requestedState) => {
   }
   mainWindow.webContents.send('floating-mode-changed', isFloatingMode);
   return { isFloating: isFloatingMode, isProtected: isContentProtected };
+});
+
+ipcMain.handle('set-overlay-collapsed', async (event, collapsed) => {
+  if (!mainWindow || !isFloatingMode) return false;
+  const bounds = mainWindow.getBounds();
+  // Remember a user-resized card height so expanding restores it
+  if (collapsed && bounds.height > OVERLAY_COLLAPSED_HEIGHT) overlayExpandedHeight = bounds.height;
+  const height = collapsed ? OVERLAY_COLLAPSED_HEIGHT : overlayExpandedHeight;
+  if (bounds.height !== height) mainWindow.setBounds({ ...bounds, height }, true);
+  return Boolean(collapsed);
 });
 
 ipcMain.handle('set-content-protection', async (event, enable) => {
@@ -279,6 +392,13 @@ app.whenReady().then(async () => {
 
   createWindow();
 
+  if (CLIPBOARD_WATCH_ENABLED) startClipboardWatcher();
+  if (globalShortcut.register(SCREENSHOT_HOTKEY, () => { void captureScreenshot(); })) {
+    console.log(`[Electron] Screenshot hotkey registered: ${SCREENSHOT_HOTKEY}`);
+  } else {
+    console.warn(`[Electron] Could not register screenshot hotkey ${SCREENSHOT_HOTKEY} (already used by another app?). Set SIDEBRO_SCREENSHOT_HOTKEY to pick another.`);
+  }
+
   // Request microphone permission on macOS without blocking the window: awaiting it before
   // createWindow left the app windowless while the system prompt was pending or hidden.
   if (process.platform === 'darwin') {
@@ -291,6 +411,10 @@ app.whenReady().then(async () => {
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+});
+
+app.on('will-quit', () => {
+  globalShortcut.unregisterAll();
 });
 
 app.on('window-all-closed', () => {

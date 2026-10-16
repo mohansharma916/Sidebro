@@ -33,6 +33,74 @@ import { JoinSessionView } from './views/JoinSessionView';
 import { ContextProfileView } from './views/ContextProfileView';
 import { PostSessionView } from './views/PostSessionView';
 import { FloatingOverlayView } from './views/FloatingOverlayView';
+import { CodingLanes, CodingSource, EMPTY_CODING_LANES } from './components/CodingAnswerPanel';
+
+const isCodingSource = (source: unknown): source is CodingSource => source === 'clipboard' || source === 'screen';
+
+/** Latest answer per coding source, used to restore the coding panels after a join or reload. */
+function codingLanesFrom(answers: GeneratedAnswer[] | undefined): CodingLanes {
+  const lanes: CodingLanes = { clipboard: { answer: null, status: null }, screen: { answer: null, status: null } };
+  for (const a of answers || []) {
+    if (isCodingSource(a.source) && (!lanes[a.source].answer || a.timestamp >= lanes[a.source].answer!.timestamp)) {
+      lanes[a.source] = { answer: a, status: null };
+    }
+  }
+  return lanes;
+}
+
+/** Wide enough to keep code legible, small enough to upload quickly (matches the Electron capture). */
+const PASTED_IMAGE_MAX_WIDTH = 1920;
+
+/** Downscales a pasted image and re-encodes it as JPEG; Retina PNG screenshots are otherwise several MB. */
+function imageFileToJpegBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const scale = Math.min(1, PASTED_IMAGE_MAX_WIDTH / img.naturalWidth);
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.round(img.naturalWidth * scale);
+      canvas.height = Math.round(img.naturalHeight * scale);
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return reject(new Error('canvas unavailable'));
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      resolve(canvas.toDataURL('image/jpeg', 0.85).split(',')[1]);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('unsupported image'));
+    };
+    img.src = url;
+  });
+}
+
+/** Appends a streamed token and progressively extracts the direct answer and key points. */
+function appendToken(prev: GeneratedAnswer, token: string): GeneratedAnswer {
+  const fullContent = (prev.fullContent || '') + token;
+
+  let directAnswer = prev.directAnswer;
+  const directMatch = fullContent.match(/### Direct Answer\s*\n([\s\S]*?)(?=\n###|$)/i);
+  if (directMatch && directMatch[1].trim()) {
+    directAnswer = directMatch[1].trim();
+  }
+
+  let keyPoints = prev.keyPoints;
+  const keyPointsMatch = fullContent.match(/### Key Points\s*\n([\s\S]*?)(?=\n###|$)/i);
+  if (keyPointsMatch && keyPointsMatch[1].trim()) {
+    const extracted = keyPointsMatch[1]
+      .split('\n')
+      .map(l => l.trim())
+      .filter(l => l.startsWith('•') || l.startsWith('-') || l.startsWith('*'))
+      .map(l => l.replace(/^[•\-\*]\s*/, '').trim())
+      .filter(Boolean);
+    if (extracted.length > 0) keyPoints = extracted;
+  }
+
+  return { ...prev, fullContent, directAnswer, keyPoints };
+}
 
 export function App() {
   // Navigation / Mode state
@@ -49,6 +117,8 @@ export function App() {
   const [currentQuestion, setCurrentQuestion] = useState<DetectedQuestion | null>(null);
   const [answers, setAnswers] = useState<Map<string, GeneratedAnswer>>(new Map());
   const [currentAnswer, setCurrentAnswer] = useState<GeneratedAnswer | null>(null);
+  // Clipboard and screenshot solutions stream in parallel to the voice answer, one panel each.
+  const [codingLanes, setCodingLanes] = useState<CodingLanes>(EMPTY_CODING_LANES);
   const [notes, setNotes] = useState<SessionNote[]>([]);
 
   // Fetch Network Info (LAN IP for QR scanning from mobile)
@@ -148,6 +218,7 @@ export function App() {
             setCurrentAnswer(ansMap.get(curQ.id)!);
           }
         }
+        setCodingLanes(codingLanesFrom(ansList));
 
         // Keep desktop agent in desktop mode; only route to second_screen if not in desktop mode
         setAppMode(prev => prev === 'desktop' ? 'desktop' : 'second_screen');
@@ -220,13 +291,19 @@ export function App() {
           if (prev.some(q => q.id === question.id)) return prev;
           return [...prev, question];
         });
-        setCurrentQuestion(question);
+        // Clipboard/screenshot questions get their own panel; the voice question card stays as it is.
+        if (!isCodingSource(question.source)) setCurrentQuestion(question);
         break;
       }
 
       case 'answer.started': {
         const answer = msg.payload as GeneratedAnswer;
-        setCurrentAnswer(answer);
+        if (isCodingSource(answer.source)) {
+          const source = answer.source;
+          setCodingLanes(prev => ({ ...prev, [source]: { answer, status: null } }));
+        } else {
+          setCurrentAnswer(answer);
+        }
         setAnswers(prev => new Map(prev).set(answer.questionId, answer));
         break;
       }
@@ -234,38 +311,31 @@ export function App() {
       case 'answer.token': {
         // Tokens are deltas tagged with their answer id; ignore tokens of superseded answers.
         const { answerId, token } = msg.payload as { answerId: string; token: string };
-        setCurrentAnswer(prev => {
-          if (!prev || prev.id !== answerId) return prev;
-          const fullContent = (prev.fullContent || '') + token;
-
-          // Progressive directAnswer extraction for instantaneous UI rendering
-          let directAnswer = prev.directAnswer;
-          const directMatch = fullContent.match(/### Direct Answer\s*\n([\s\S]*?)(?=\n###|$)/i);
-          if (directMatch && directMatch[1].trim()) {
-            directAnswer = directMatch[1].trim();
+        setCurrentAnswer(prev => (prev && prev.id === answerId ? appendToken(prev, token) : prev));
+        setCodingLanes(prev => {
+          for (const source of ['clipboard', 'screen'] as const) {
+            const lane = prev[source];
+            if (lane.answer?.id === answerId) {
+              return { ...prev, [source]: { ...lane, answer: appendToken(lane.answer, token) } };
+            }
           }
-
-          // Progressive keyPoints extraction as bullets stream in
-          let keyPoints = prev.keyPoints;
-          const keyPointsMatch = fullContent.match(/### Key Points\s*\n([\s\S]*?)(?=\n###|$)/i);
-          if (keyPointsMatch && keyPointsMatch[1].trim()) {
-            const extracted = keyPointsMatch[1]
-              .split('\n')
-              .map(l => l.trim())
-              .filter(l => l.startsWith('•') || l.startsWith('-') || l.startsWith('*'))
-              .map(l => l.replace(/^[•\-\*]\s*/, '').trim())
-              .filter(Boolean);
-            if (extracted.length > 0) keyPoints = extracted;
-          }
-
-          return { ...prev, fullContent, directAnswer, keyPoints };
+          return prev;
         });
         break;
       }
 
       case 'answer.completed': {
         const answer = msg.payload as GeneratedAnswer;
-        setCurrentAnswer(prev => (!prev || prev.id === answer.id ? answer : prev));
+        if (isCodingSource(answer.source)) {
+          const source = answer.source;
+          setCodingLanes(prev => {
+            // A different id means a newer answer replaced it; no answer means the panel was dismissed.
+            if (prev[source].answer?.id !== answer.id) return prev;
+            return { ...prev, [source]: { answer, status: null } };
+          });
+        } else {
+          setCurrentAnswer(prev => (!prev || prev.id === answer.id ? answer : prev));
+        }
         setAnswers(prev => {
           const existing = prev.get(answer.questionId);
           if (existing && existing.id !== answer.id && existing.timestamp > answer.timestamp) return prev;
@@ -480,6 +550,7 @@ export function App() {
     if (data.currentQuestion && ansMap.has(data.currentQuestion.id)) {
       setCurrentAnswer(ansMap.get(data.currentQuestion.id)!);
     }
+    setCodingLanes(codingLanesFrom(data.answers));
 
     setAppMode('second_screen');
 
@@ -580,6 +651,98 @@ export function App() {
     }
   };
 
+  const setLaneStatus = (source: CodingSource, status: string | null) =>
+    setCodingLanes(prev => ({ ...prev, [source]: { ...prev[source], status } }));
+
+  const dismissCodingLane = useCallback((source: CodingSource) => {
+    setCodingLanes(prev => ({ ...prev, [source]: { answer: null, status: null } }));
+  }, []);
+
+  // Background copies only go out while a session is running: a stray copy must never start one.
+  // An explicit paste into SideBro may start a session, like a typed question does.
+  const handleClipboardCopied = async (text: string, explicit = false) => {
+    if (explicit) {
+      setLaneStatus('clipboard', 'Solving the pasted text…');
+      await ensureLiveSession().catch(() => {});
+    }
+    const cur = sessionRef.current;
+    if (!cur || cur.status === 'ended') {
+      if (explicit) setLaneStatus('clipboard', '⚠ Start a session first.');
+      return;
+    }
+    try {
+      const res = await postJson(`/api/sessions/${cur.id}/solve/clipboard`, { text });
+      if (!res.ok) setLaneStatus('clipboard', `⚠ Could not send the copied text (HTTP ${res.status}).`);
+    } catch (err: any) {
+      setLaneStatus('clipboard', `⚠ Could not send the copied text: ${err.message}`);
+    }
+  };
+
+  // The screenshot hotkey is an explicit request, so it may start a session like a typed question does.
+  const handleScreenshotCaptured = async (imageBase64: string, mimeType: string) => {
+    setLaneStatus('screen', 'Reading the screenshot…');
+    try {
+      await ensureLiveSession();
+      const cur = sessionRef.current;
+      if (!cur) throw new Error('no active session');
+      const res = await postJson(`/api/sessions/${cur.id}/solve/screenshot`, { imageBase64, mimeType });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        setLaneStatus('screen', `⚠ ${errData.message || `Screenshot upload failed (HTTP ${res.status}).`}`);
+      }
+    } catch (err: any) {
+      setLaneStatus('screen', `⚠ Screenshot upload failed: ${err.message}`);
+    }
+  };
+
+  const handleCaptureScreenshot = () => {
+    window.electronAPI?.captureScreenshot?.().catch(err => setLaneStatus('screen', `⚠ ${err.message}`));
+  };
+
+  // Electron listeners are registered once; the ref always points at this render's handlers.
+  const codingHandlersRef = useRef({ handleClipboardCopied, handleScreenshotCaptured, setLaneStatus });
+  codingHandlersRef.current = { handleClipboardCopied, handleScreenshotCaptured, setLaneStatus };
+  useEffect(() => {
+    const api = window.electronAPI;
+    if (!api) return;
+    api.on('clipboard-copied', (data: { text: string }) => {
+      void codingHandlersRef.current.handleClipboardCopied(data.text);
+    });
+    api.on('screenshot-captured', (data: { imageBase64: string; mimeType: string }) => {
+      void codingHandlersRef.current.handleScreenshotCaptured(data.imageBase64, data.mimeType);
+    });
+    api.on('screenshot-error', (data: { message: string }) => {
+      codingHandlersRef.current.setLaneStatus('screen', `⚠ ${data.message}`);
+    });
+  }, []);
+
+  // Browser fallback (Docker / web, where nothing watches the clipboard): Cmd/Ctrl+V anywhere on the
+  // page solves pasted text, and a pasted image (e.g. Cmd+Ctrl+Shift+4 screenshot) solves that image.
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)) return;
+      const data = e.clipboardData;
+      if (!data) return;
+      const imageItem = Array.from(data.items).find(item => item.kind === 'file' && item.type.startsWith('image/'));
+      const file = imageItem?.getAsFile();
+      if (file) {
+        e.preventDefault();
+        codingHandlersRef.current.setLaneStatus('screen', 'Preparing the pasted image…');
+        imageFileToJpegBase64(file)
+          .then(base64 => codingHandlersRef.current.handleScreenshotCaptured(base64, 'image/jpeg'))
+          .catch(err => codingHandlersRef.current.setLaneStatus('screen', `⚠ Could not read the pasted image: ${err.message}`));
+        return;
+      }
+      const text = data.getData('text/plain').trim();
+      if (!text) return;
+      e.preventDefault();
+      void codingHandlersRef.current.handleClipboardCopied(text, true);
+    };
+    document.addEventListener('paste', onPaste);
+    return () => document.removeEventListener('paste', onPaste);
+  }, []);
+
   const handleSaveNote = (text: string, questionId?: string) => {
     if (session) {
       send('note.create', { text, questionId }, session.id);
@@ -641,6 +804,9 @@ export function App() {
         questions={questions}
         currentQuestion={currentQuestion}
         currentAnswer={currentAnswer}
+        codingLanes={codingLanes}
+        onDismissCodingLane={dismissCodingLane}
+        onCaptureScreenshot={isElectron ? handleCaptureScreenshot : undefined}
         isProtected={isStealthProtected}
         onToggleProtection={handleToggleStealthProtection}
         onExitFloatingMode={handleToggleFloatingMode}
@@ -765,6 +931,8 @@ export function App() {
             questions={questions}
             currentQuestion={currentQuestion}
             currentAnswer={currentAnswer}
+            codingLanes={codingLanes}
+            onDismissCodingLane={dismissCodingLane}
             onStartMicrophone={startMicrophone}
             onStopMicrophone={stopMicrophone}
             onStartSystemAudio={startSystemAudio}
@@ -794,6 +962,8 @@ export function App() {
               questions={questions}
               currentQuestion={currentQuestion}
               currentAnswer={currentAnswer}
+              codingLanes={codingLanes}
+              onDismissCodingLane={dismissCodingLane}
               notes={notes}
               onLengthModeChange={handleLengthModeChange}
               onTriggerModifier={handleTriggerModifier}

@@ -192,6 +192,57 @@ test('a newer question cancels the in-flight answer', async () => {
   owner.close();
 });
 
+test('a clipboard solution streams alongside the voice answer without cancelling it', async () => {
+  const s = await createSession();
+  const owner = await joinWithToken(s);
+  const voiceRes = await api(`/api/sessions/${s.id}/ask`, { token: s.token, method: 'POST', body: { questionText: 'How does React Fiber work?' } });
+  const voiceQuestion = (await voiceRes.json()).question;
+  await waitFor(() => owner.msgs.some(m => m.event === 'answer.token'));
+
+  const clipRes = await api(`/api/sessions/${s.id}/solve/clipboard`, {
+    token: s.token,
+    method: 'POST',
+    body: { text: 'Given an array of integers nums and a target, return indices of the two numbers that add up to target.' },
+  });
+  assert.equal(clipRes.status, 201);
+  const clipQuestion = (await clipRes.json()).question;
+  assert.equal(clipQuestion.source, 'clipboard');
+  assert.equal(clipQuestion.type, 'Coding');
+
+  await waitFor(() => owner.msgs.filter(m => m.event === 'answer.completed').length === 2, 30000);
+  const completed = owner.msgs.filter(m => m.event === 'answer.completed').map(m => m.payload);
+  const voice = completed.find(a => a.questionId === voiceQuestion.id);
+  const clip = completed.find(a => a.questionId === clipQuestion.id);
+  assert.equal(clip.source, 'clipboard');
+  assert.match(voice.fullContent, /Offline template/, 'voice answer streamed to the end');
+
+  // The voice flow keeps its own current question; the coding answer is persisted with its source.
+  const state = await (await api(`/api/sessions/${s.id}`, { token: s.token })).json();
+  assert.equal(state.currentQuestion.id, voiceQuestion.id);
+  assert.equal(state.answers.find(a => a.questionId === clipQuestion.id).source, 'clipboard');
+  owner.close();
+});
+
+test('screenshot solving validates input and explains a missing vision provider', async () => {
+  const s = await createSession();
+  const owner = await joinWithToken(s);
+  const missing = await api(`/api/sessions/${s.id}/solve/screenshot`, { token: s.token, method: 'POST', body: {} });
+  assert.equal(missing.status, 400);
+  const tooShort = await api(`/api/sessions/${s.id}/solve/clipboard`, { token: s.token, method: 'POST', body: { text: '   ' } });
+  assert.equal(tooShort.status, 400);
+
+  const res = await api(`/api/sessions/${s.id}/solve/screenshot`, {
+    token: s.token,
+    method: 'POST',
+    body: { imageBase64: Buffer.from('not really a jpeg').toString('base64'), mimeType: 'image/jpeg' },
+  });
+  assert.equal(res.status, 201);
+  const done = await waitFor(() => owner.msgs.find(m => m.event === 'answer.completed'), 20000);
+  assert.equal(done.payload.source, 'screen');
+  assert.match(done.payload.directAnswer, /vision-capable/);
+  owner.close();
+});
+
 test('ended sessions reject new transcripts and their codes stop resolving', async () => {
   const s = await createSession();
   const end = await api(`/api/sessions/${s.id}/end`, { token: s.token, method: 'POST' });

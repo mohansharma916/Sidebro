@@ -34,6 +34,7 @@ import { DeviceHealthBar } from '../components/DeviceHealthBar';
 import { InterviewSimulator } from '../components/InterviewSimulator';
 import { PostSessionView } from './PostSessionView';
 import { FormattedText } from '../components/FormattedText';
+import { CodingAnswerPanel, CodingLanes, CodingSource } from '../components/CodingAnswerPanel';
 
 interface DesktopAgentViewProps {
   session: SessionState | null;
@@ -48,6 +49,8 @@ interface DesktopAgentViewProps {
   questions: DetectedQuestion[];
   currentQuestion: DetectedQuestion | null;
   currentAnswer: GeneratedAnswer | null;
+  codingLanes: CodingLanes;
+  onDismissCodingLane: (source: CodingSource) => void;
   onStartMicrophone: () => void;
   onStopMicrophone: () => void;
   onStartSystemAudio: () => void;
@@ -75,6 +78,8 @@ export const DesktopAgentView: React.FC<DesktopAgentViewProps> = ({
   questions,
   currentQuestion,
   currentAnswer,
+  codingLanes,
+  onDismissCodingLane,
   onStartMicrophone,
   onStopMicrophone,
   onStartSystemAudio,
@@ -785,6 +790,16 @@ export const DesktopAgentView: React.FC<DesktopAgentViewProps> = ({
             )}
           </div>
         </div>
+
+        {/* Clipboard / screenshot solutions, shown only once something was copied or captured */}
+        {(['clipboard', 'screen'] as const).map(source => (
+          <CodingAnswerPanel
+            key={source}
+            source={source}
+            lane={codingLanes[source]}
+            onDismiss={() => onDismissCodingLane(source)}
+          />
+        ))}
 
         {/* 4. Interactive Interview Simulator (PRD Section 69 MVP User Journey) */}
         <InterviewSimulator

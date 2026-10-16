@@ -15,6 +15,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
       'system-audio-available',
       'floating-mode-changed',
       'stealth-status-changed',
+      'clipboard-copied',
+      'screenshot-captured',
+      'screenshot-error',
     ];
     if (validChannels.includes(channel)) {
       ipcRenderer.on(channel, (event, ...args) => func(...args));
@@ -26,6 +29,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       'set-content-protection',
       'get-stealth-status',
       'set-window-opacity',
+      'set-overlay-collapsed',
+      'capture-screenshot',
     ];
     if (validChannels.includes(channel)) {
       return ipcRenderer.invoke(channel, ...args);
@@ -36,4 +41,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setContentProtection: (enable) => ipcRenderer.invoke('set-content-protection', enable),
   getStealthStatus: () => ipcRenderer.invoke('get-stealth-status'),
   setWindowOpacity: (opacity) => ipcRenderer.invoke('set-window-opacity', opacity),
+  captureScreenshot: () => ipcRenderer.invoke('capture-screenshot'),
+  setOverlayCollapsed: (collapsed) => ipcRenderer.invoke('set-overlay-collapsed', collapsed),
 });

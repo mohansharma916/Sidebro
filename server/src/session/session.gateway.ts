@@ -13,12 +13,13 @@ import { ContextService } from '../context/context.service.js';
 import { AiService } from '../ai/ai.service.js';
 import { QuestionDetectorService } from './question-detector.service.js';
 import { MockInterviewerService } from './mock-interviewer.service.js';
-import type { AnswerModifier } from '../aiEngine.js';
+import type { AnswerModifier, AnswerStreamCallbacks, CodingInput } from '../aiEngine.js';
 import { isAllowedOrigin } from '../common/origin.js';
 import { RateLimiter } from '../common/rate-limiter.js';
 import {
   ANSWER_LENGTHS,
   EXPERIENCE_LEVELS,
+  MAX_CLIPBOARD_CHARS,
   MAX_NOTE_CHARS,
   MAX_QUESTION_CHARS,
   MAX_TRANSCRIPT_CHARS,
@@ -32,6 +33,7 @@ import {
   sanitizeProfile,
 } from '../common/validation.js';
 import {
+  AnswerSource,
   DetectedQuestion,
   GeneratedAnswer,
   PostSessionSummary,
@@ -62,9 +64,13 @@ export class SessionGateway
   private readonly logger = new Logger(SessionGateway.name);
   private sessionClients: Map<string, Set<WebSocket>> = new Map();
   private clientMetadata: Map<WebSocket, ClientMeta> = new Map();
-  /** In-flight answer per session; a newer question cancels the older stream. */
+  /**
+   * In-flight answer per session and source (voice, clipboard, screen). A newer question cancels
+   * the older stream of the same source only, so the three panels never interrupt each other.
+   */
   private inFlightAnswers: Map<string, AbortController> = new Map();
   private askLimiter = new RateLimiter(10, 60_000);
+  private codingLimiter = new RateLimiter(20, 60_000);
   private joinLimiter = new RateLimiter(30, 60_000);
 
   constructor(
@@ -192,26 +198,52 @@ export class SessionGateway
     const session = this.sessionService.getSession(question.sessionId);
     if (!session) return;
 
-    // Cancel the previous answer for this session; only the newest question matters.
-    this.inFlightAnswers.get(question.sessionId)?.abort();
-    const controller = new AbortController();
-    this.inFlightAnswers.set(question.sessionId, controller);
-
     const relevantChunks = this.contextService.retrieveContext(session.profile, question.questionText, 3);
+    const recentTranscripts = this.recentTranscripts(question.sessionId);
 
-    const recentTranscripts = this.sessionService
-      .getTranscripts(question.sessionId)
-      .slice(-6)
-      .map(t => ({ speaker: t.speaker, text: t.text }));
-
-    let answerId = '';
-    try {
-      await this.aiService.streamAnswer(
+    await this.runAnswerStream(question, (callbacks, signal) =>
+      this.aiService.streamAnswer(
         question,
         session.type,
         session.answerLength,
         relevantChunks.map(r => r.chunk),
         recentTranscripts,
+        callbacks,
+        actionModifier,
+        signal
+      )
+    );
+  }
+
+  private async triggerCodingAnswer(question: DetectedQuestion, input: CodingInput): Promise<void> {
+    const session = this.sessionService.getSession(question.sessionId);
+    if (!session) return;
+    const recentTranscripts = this.recentTranscripts(question.sessionId);
+    await this.runAnswerStream(question, (callbacks, signal) =>
+      this.aiService.streamCodingAnswer(question, input, recentTranscripts, callbacks, session.profile?.preferredLanguage, signal)
+    );
+  }
+
+  private recentTranscripts(sessionId: string): { speaker: string; text: string }[] {
+    return this.sessionService
+      .getTranscripts(sessionId)
+      .slice(-6)
+      .map(t => ({ speaker: t.speaker, text: t.text }));
+  }
+
+  /** Streams an answer to every device in the session, cancelling only the previous answer of the same source. */
+  private async runAnswerStream(
+    question: DetectedQuestion,
+    stream: (callbacks: AnswerStreamCallbacks, signal: AbortSignal) => Promise<void>
+  ): Promise<void> {
+    const key = `${question.sessionId}:${question.source || 'voice'}`;
+    this.inFlightAnswers.get(key)?.abort();
+    const controller = new AbortController();
+    this.inFlightAnswers.set(key, controller);
+
+    let answerId = '';
+    try {
+      await stream(
         {
           onStart: (answer: GeneratedAnswer) => {
             answerId = answer.id;
@@ -246,15 +278,20 @@ export class SessionGateway
             });
           },
         },
-        actionModifier,
         controller.signal
       );
     } catch (err) {
-      this.logger.error('Error in triggerAnswerGeneration:', err as Error);
+      this.logger.error('Error in answer generation:', err as Error);
     } finally {
-      if (this.inFlightAnswers.get(question.sessionId) === controller) {
-        this.inFlightAnswers.delete(question.sessionId);
+      if (this.inFlightAnswers.get(key) === controller) {
+        this.inFlightAnswers.delete(key);
       }
+    }
+  }
+
+  private abortAnswers(sessionId: string): void {
+    for (const [key, controller] of this.inFlightAnswers) {
+      if (key.startsWith(`${sessionId}:`)) controller.abort();
     }
   }
 
@@ -330,6 +367,36 @@ export class SessionGateway
     return { ok: true, value: question };
   }
 
+  /**
+   * Solves a coding problem from copied text or a screenshot. Runs alongside the voice answer
+   * without cancelling it; a newer copy/screenshot replaces only the previous one of its kind.
+   */
+  public solveCoding(sessionId: string, source: Exclude<AnswerSource, 'voice'>, input: CodingInput): OpResult<DetectedQuestion> {
+    const session = this.sessionService.getSession(sessionId);
+    if (!session) return { ok: false, status: 404, message: 'Session not found' };
+    if (session.status === 'ended') return { ok: false, status: 409, message: 'Session has ended' };
+    if (input.kind === 'text') {
+      const text = cleanText(input.text, MAX_CLIPBOARD_CHARS);
+      if (!text) return { ok: false, status: 400, message: 'Text is required' };
+      input = { kind: 'text', text };
+    }
+    if (!this.codingLimiter.allow(sessionId)) return { ok: false, status: 429, message: 'Too many requests; slow down' };
+
+    const question: DetectedQuestion = {
+      id: `q-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      sessionId,
+      questionText: input.kind === 'text' ? input.text : 'Coding problem from screenshot',
+      type: 'Coding',
+      timestamp: Date.now(),
+      confidence: 1.0,
+      source,
+    };
+    this.sessionService.addQuestion(question);
+    this.broadcastToSession(sessionId, { event: 'question.detected', sessionId, payload: question });
+    void this.triggerCodingAnswer(question, input);
+    return { ok: true, value: question };
+  }
+
   public regenerate(sessionId: string, questionId: unknown, rawModifier: unknown): OpResult<DetectedQuestion> {
     const session = this.sessionService.getSession(sessionId);
     if (!session) return { ok: false, status: 404, message: 'Session not found' };
@@ -364,7 +431,7 @@ export class SessionGateway
   public pause(sessionId: string): SessionState | undefined {
     const session = this.sessionService.pauseSession(sessionId);
     if (session) {
-      this.inFlightAnswers.get(sessionId)?.abort();
+      this.abortAnswers(sessionId);
       this.broadcastToSession(sessionId, {
         event: 'session.paused',
         sessionId,
@@ -389,7 +456,7 @@ export class SessionGateway
   public end(sessionId: string): { session: SessionState; summary?: PostSessionSummary } | undefined {
     const session = this.sessionService.endSession(sessionId);
     if (!session) return undefined;
-    this.inFlightAnswers.get(sessionId)?.abort();
+    this.abortAnswers(sessionId);
     this.mockInterviewerService.stopScenario(sessionId);
     this.questionDetectorService.clearSession(sessionId);
     const summary = this.sessionService.generateSummary(sessionId);

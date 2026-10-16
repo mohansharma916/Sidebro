@@ -23,6 +23,8 @@ const DEVICE_ROLES: readonly DeviceRole[] = ['PRIMARY_CAPTURE', 'SECOND_SCREEN']
 
 export const MAX_TRANSCRIPT_CHARS = 4000;
 export const MAX_QUESTION_CHARS = 1000;
+/** Copied coding problems (statement, examples, constraints, starter code) are much longer than spoken questions. */
+export const MAX_CLIPBOARD_CHARS = 12_000;
 export const MAX_NOTE_CHARS = 4000;
 export const MAX_PROFILE_FIELD_CHARS = 50_000;
 

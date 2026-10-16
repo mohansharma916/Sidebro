@@ -19,6 +19,8 @@ const CODE_TTL_MS = 12 * 60 * 60 * 1000;
 /** How often the running duration is flushed to SQLite. */
 const DURATION_PERSIST_EVERY_S = 15;
 
+const isVoice = (q: DetectedQuestion) => !q.source || q.source === 'voice';
+
 export class SessionManager {
   protected readonly storage: StorageEngine;
   private sessions: Map<string, SessionState> = new Map();
@@ -306,15 +308,15 @@ export class SessionManager {
 
   public addQuestion(question: DetectedQuestion): void {
     this.getQuestions(question.sessionId).push(question);
-    this.currentQuestion.set(question.sessionId, question);
+    // Clipboard and screenshot questions have their own panels; "current" tracks the voice flow only.
+    if (isVoice(question)) this.currentQuestion.set(question.sessionId, question);
     this.storage.saveQuestion(question);
   }
 
   public getCurrentQuestion(sessionId: string): DetectedQuestion | undefined {
     const current = this.currentQuestion.get(sessionId);
     if (current) return current;
-    const list = this.getQuestions(sessionId);
-    return list[list.length - 1];
+    return [...this.getQuestions(sessionId)].reverse().find(isVoice);
   }
 
   public getQuestions(sessionId: string): DetectedQuestion[] {

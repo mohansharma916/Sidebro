@@ -22,6 +22,7 @@ import {
 } from '../types';
 import { DeviceHealthBar } from '../components/DeviceHealthBar';
 import { StreamingAnswer } from '../components/StreamingAnswer';
+import { CodingAnswerPanel, CodingLanes, CodingSource } from '../components/CodingAnswerPanel';
 import { TranscriptFeed } from '../components/TranscriptFeed';
 import { AskAIModal } from '../components/AskAIModal';
 import { PostSessionView } from './PostSessionView';
@@ -33,6 +34,8 @@ interface SecondScreenViewProps {
   questions: DetectedQuestion[];
   currentQuestion: DetectedQuestion | null;
   currentAnswer: GeneratedAnswer | null;
+  codingLanes: CodingLanes;
+  onDismissCodingLane: (source: CodingSource) => void;
   notes: SessionNote[];
   onLengthModeChange: (mode: AnswerLengthMode) => void;
   onTriggerModifier: (modifier: 'shorter' | 'expand' | 'example' | 'technical_detail' | 'star' | 'alternative') => void;
@@ -48,6 +51,8 @@ export const SecondScreenView: React.FC<SecondScreenViewProps> = ({
   questions,
   currentQuestion,
   currentAnswer,
+  codingLanes,
+  onDismissCodingLane,
   notes,
   onLengthModeChange,
   onTriggerModifier,
@@ -235,6 +240,17 @@ export const SecondScreenView: React.FC<SecondScreenViewProps> = ({
               onBookmarkAnswer={ans => onSaveNote(`[Answer] ${ans.directAnswer}`, ans.questionId)}
               onSelectFollowUp={q => onManualAsk(q)}
             />
+
+            {/* Clipboard / screenshot solutions, shown only once something was copied or captured */}
+            {(['clipboard', 'screen'] as const).map(source => (
+              <div key={source} style={{ marginTop: '14px' }}>
+                <CodingAnswerPanel
+                  source={source}
+                  lane={codingLanes[source]}
+                  onDismiss={() => onDismissCodingLane(source)}
+                />
+              </div>
+            ))}
 
             {/* Quick Test Questions Bar for Second Screen testing */}
             <div style={{

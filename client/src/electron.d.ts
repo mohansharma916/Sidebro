@@ -8,6 +8,8 @@ export interface ElectronAPI {
   setContentProtection?: (enable: boolean) => Promise<boolean>;
   getStealthStatus?: () => Promise<{ isElectron: boolean; isFloating: boolean; isProtected: boolean; isAlwaysOnTop: boolean }>;
   setWindowOpacity?: (opacity: number) => Promise<number>;
+  captureScreenshot?: () => Promise<boolean>;
+  setOverlayCollapsed?: (collapsed: boolean) => Promise<boolean>;
 }
 
 declare global {

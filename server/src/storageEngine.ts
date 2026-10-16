@@ -209,6 +209,14 @@ export class StorageEngine {
     if (!sessionCols.some(c => c.name === 'token')) {
       this.db.exec('ALTER TABLE sessions ADD COLUMN token TEXT');
     }
+
+    // Migration: question/answer source (voice, clipboard, screen)
+    for (const table of ['questions', 'answers']) {
+      const cols = this.db.prepare(`PRAGMA table_info(${table})`).all() as any[];
+      if (!cols.some(c => c.name === 'source')) {
+        this.db.exec(`ALTER TABLE ${table} ADD COLUMN source TEXT`);
+      }
+    }
   }
 
   // --- Profile Methods ---
@@ -405,8 +413,8 @@ export class StorageEngine {
   public saveQuestion(question: DetectedQuestion): void {
     const stmt = this.db.prepare(`
       INSERT OR REPLACE INTO questions (
-        id, session_id, transcript_id, question_text, category, confidence, context_summary, timestamp
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        id, session_id, transcript_id, question_text, category, confidence, context_summary, timestamp, source
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
 
     stmt.run(
@@ -417,7 +425,8 @@ export class StorageEngine {
       question.type,
       question.confidence,
       question.contextSummary || null,
-      question.timestamp
+      question.timestamp,
+      question.source || null
     );
   }
 
@@ -432,6 +441,7 @@ export class StorageEngine {
       confidence: r.confidence,
       contextSummary: r.context_summary || undefined,
       timestamp: r.timestamp,
+      source: r.source || undefined,
     }));
   }
 
@@ -443,8 +453,8 @@ export class StorageEngine {
         id, question_id, session_id, question_text, direct_answer,
         key_points_json, code_snippet, follow_ups_json, full_content,
         is_complete, length_mode, model, context_used_json,
-        first_token_latency_ms, total_latency_ms, timestamp
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        first_token_latency_ms, total_latency_ms, timestamp, source
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         direct_answer = excluded.direct_answer,
         key_points_json = excluded.key_points_json,
@@ -472,7 +482,8 @@ export class StorageEngine {
       JSON.stringify(answer.contextUsed || []),
       answer.firstTokenLatencyMs || null,
       answer.totalLatencyMs || null,
-      answer.timestamp
+      answer.timestamp,
+      answer.source || null
     );
   }
 
@@ -507,6 +518,7 @@ export class StorageEngine {
       firstTokenLatencyMs: r.first_token_latency_ms || undefined,
       totalLatencyMs: r.total_latency_ms || undefined,
       timestamp: r.timestamp,
+      source: r.source || undefined,
     };
   }
 

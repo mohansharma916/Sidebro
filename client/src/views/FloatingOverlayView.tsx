@@ -5,7 +5,6 @@ import {
   Maximize2,
   Mic,
   MicOff,
-  Volume2,
   Sparkles,
   Zap,
   Copy,
@@ -13,9 +12,13 @@ import {
   Send,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
+  ChevronUp,
   MessageSquare,
-  Play,
-  RotateCcw,
+  Camera,
+  Eye,
+  User,
+  Users,
 } from 'lucide-react';
 import {
   AnswerLengthMode,
@@ -25,6 +28,7 @@ import {
   TranscriptItem,
 } from '../types';
 import { FormattedText } from '../components/FormattedText';
+import { CodingAnswerPanel, CodingLanes, CodingSource } from '../components/CodingAnswerPanel';
 
 interface FloatingOverlayViewProps {
   session: SessionState | null;
@@ -39,6 +43,9 @@ interface FloatingOverlayViewProps {
   questions: DetectedQuestion[];
   currentQuestion: DetectedQuestion | null;
   currentAnswer: GeneratedAnswer | null;
+  codingLanes: CodingLanes;
+  onDismissCodingLane: (source: CodingSource) => void;
+  onCaptureScreenshot?: () => void;
   isProtected: boolean;
   onToggleProtection: () => void;
   onExitFloatingMode: () => void;
@@ -50,6 +57,50 @@ interface FloatingOverlayViewProps {
   onManualAsk: (text: string) => void;
 }
 
+const OPACITY_STEPS = [1.0, 0.8, 0.6, 0.45, 0.3];
+const ACCENT = '#7dd3fc';
+const isMac = window.electronAPI?.platform === 'darwin';
+// On macOS the Electron window gets native vibrancy, so the page stays see-through to show the frosted glass.
+const useNativeGlass = Boolean(window.electronAPI?.isElectron && isMac);
+
+const iconButton = (active = false): React.CSSProperties => ({
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  gap: '5px',
+  height: '30px',
+  minWidth: '30px',
+  padding: '0 9px',
+  borderRadius: '999px',
+  border: '1px solid rgba(255, 255, 255, 0.08)',
+  background: active ? 'rgba(125, 211, 252, 0.16)' : 'rgba(255, 255, 255, 0.06)',
+  color: active ? ACCENT : '#cbd5e1',
+  fontSize: '0.7rem',
+  fontWeight: 600,
+  cursor: 'pointer',
+  whiteSpace: 'nowrap',
+  WebkitAppRegion: 'no-drag',
+} as React.CSSProperties);
+
+/** Five bars that bounce with the loudest live audio source, the "listening" signal in the bar. */
+const ListeningWave: React.FC<{ level: number; active: boolean }> = ({ level, active }) => (
+  <div style={{ display: 'flex', alignItems: 'center', gap: '2px', height: '14px' }}>
+    {[0.55, 0.85, 1, 0.75, 0.5].map((weight, i) => (
+      <span
+        key={i}
+        style={{
+          width: '3px',
+          borderRadius: '2px',
+          background: active ? ACCENT : '#475569',
+          height: active ? `${Math.max(3, Math.min(14, 3 + level * 40 * weight))}px` : '3px',
+          transition: 'height 0.09s ease',
+          animation: active && level < 0.02 ? `sb-idle-wave 1.2s ${i * 0.12}s ease-in-out infinite` : undefined,
+        }}
+      />
+    ))}
+  </div>
+);
+
 export const FloatingOverlayView: React.FC<FloatingOverlayViewProps> = ({
   session,
   latencyMs,
@@ -57,7 +108,6 @@ export const FloatingOverlayView: React.FC<FloatingOverlayViewProps> = ({
   isSystemAudioActive,
   micVolume,
   systemVolume,
-  vadActive,
   micRole,
   transcripts,
   questions,
@@ -69,12 +119,15 @@ export const FloatingOverlayView: React.FC<FloatingOverlayViewProps> = ({
   onToggleMicrophone,
   onToggleMicRole,
   onEnsureSession,
-  onLengthModeChange,
   onTriggerModifier,
   onManualAsk,
+  codingLanes,
+  onDismissCodingLane,
+  onCaptureScreenshot,
 }) => {
   const [activeTab, setActiveTab] = useState<'ANSWERS' | 'TRANSCRIPTS'>('ANSWERS');
   const [opacityLevel, setOpacityLevel] = useState<number>(1.0);
+  const [collapsed, setCollapsed] = useState(false);
   const [copied, setCopied] = useState(false);
   const [customQuery, setCustomQuery] = useState('');
   const [selectedQuestionIndex, setSelectedQuestionIndex] = useState<number>(-1);
@@ -86,6 +139,29 @@ export const FloatingOverlayView: React.FC<FloatingOverlayViewProps> = ({
       onEnsureSession();
     }
   }, [session?.status]);
+
+  // Let the native window vibrancy show through while the overlay is mounted
+  useEffect(() => {
+    if (!useNativeGlass) return;
+    const { body, documentElement } = document;
+    const prev = { body: body.style.background, html: documentElement.style.background };
+    body.style.background = 'transparent';
+    documentElement.style.background = 'transparent';
+    return () => {
+      body.style.background = prev.body;
+      documentElement.style.background = prev.html;
+    };
+  }, []);
+
+  // Keep the Electron window height in sync with the collapsed bar / expanded card
+  useEffect(() => {
+    window.electronAPI?.setOverlayCollapsed?.(collapsed).catch(() => {});
+  }, [collapsed]);
+
+  // A fresh answer pops the card back open, like Parakeet's auto-expand
+  useEffect(() => {
+    if (currentAnswer?.id) setCollapsed(false);
+  }, [currentAnswer?.id]);
 
   // Sync selected index when new questions arrive
   useEffect(() => {
@@ -105,12 +181,14 @@ export const FloatingOverlayView: React.FC<FloatingOverlayViewProps> = ({
     selectedQuestionIndex >= 0 && selectedQuestionIndex < questions.length
       ? questions[selectedQuestionIndex]
       : currentQuestion;
+  const questionPosition = selectedQuestionIndex >= 0 ? selectedQuestionIndex : questions.length - 1;
+  const isListening = isMicActive || isSystemAudioActive;
+  const audioLevel = Math.max(isMicActive ? micVolume : 0, isSystemAudioActive ? systemVolume : 0);
 
-  const handleOpacityChange = (level: number) => {
-    setOpacityLevel(level);
-    if (window.electronAPI?.setWindowOpacity) {
-      window.electronAPI.setWindowOpacity(level);
-    }
+  const cycleOpacity = () => {
+    const next = OPACITY_STEPS[(OPACITY_STEPS.indexOf(opacityLevel) + 1) % OPACITY_STEPS.length];
+    setOpacityLevel(next);
+    window.electronAPI?.setWindowOpacity?.(next);
   };
 
   const handleCopyAnswer = () => {
@@ -127,6 +205,7 @@ export const FloatingOverlayView: React.FC<FloatingOverlayViewProps> = ({
     onManualAsk(customQuery.trim());
     setCustomQuery('');
     setActiveTab('ANSWERS');
+    setCollapsed(false);
   };
 
   const sampleQuestions = [
@@ -135,6 +214,8 @@ export const FloatingOverlayView: React.FC<FloatingOverlayViewProps> = ({
     'How to design a distributed rate limiter?',
   ];
 
+  const modKey = isMac ? '⌘' : 'Ctrl';
+
   return (
     <div
       style={{
@@ -142,378 +223,132 @@ export const FloatingOverlayView: React.FC<FloatingOverlayViewProps> = ({
         height: '100vh',
         display: 'flex',
         flexDirection: 'column',
-        background: `rgba(8, 11, 17, ${opacityLevel < 1 ? opacityLevel * 0.95 : 0.98})`,
-        backdropFilter: 'blur(20px)',
-        WebkitBackdropFilter: 'blur(20px)',
-        color: '#f8fafc',
+        background: useNativeGlass ? 'rgba(14, 16, 22, 0.22)' : 'rgba(14, 16, 22, 0.78)',
+        color: '#f1f5f9',
         fontFamily: 'var(--font-sans)',
         overflow: 'hidden',
-        border: '1px solid rgba(0, 242, 254, 0.25)',
-        boxShadow: '0 8px 32px rgba(0, 0, 0, 0.6)',
+        borderRadius: useNativeGlass ? 0 : '14px',
+        border: useNativeGlass ? 'none' : '1px solid rgba(255, 255, 255, 0.1)',
       }}
     >
-      {/* Draggable Titlebar & Stealth Status Bar */}
+      <style>{`
+        @keyframes sb-idle-wave { 0%, 100% { height: 3px; } 50% { height: 9px; } }
+        @keyframes sb-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+        .sb-overlay-scroll::-webkit-scrollbar { width: 6px; }
+        .sb-overlay-scroll::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
+        .sb-chip:hover:not(:disabled) { background: rgba(255,255,255,0.12) !important; color: #f8fafc !important; }
+      `}</style>
+
+      {/* Control bar: the whole strip drags the window; every control opts out of dragging */}
       <div
         style={{
           display: 'flex',
           alignItems: 'center',
-          justifyContent: 'space-between',
-          padding: '8px 12px',
-          background: 'rgba(15, 23, 42, 0.9)',
-          borderBottom: '1px solid rgba(255, 255, 255, 0.08)',
-          cursor: 'grab',
+          gap: '6px',
+          height: '56px',
+          flexShrink: 0,
+          padding: '0 12px',
           WebkitAppRegion: 'drag',
           userSelect: 'none',
+          cursor: 'grab',
+          borderBottom: collapsed ? 'none' : '1px solid rgba(255, 255, 255, 0.07)',
         } as React.CSSProperties}
       >
-        {/* Stealth Badge & Logo */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '5px',
-              padding: '3px 8px',
-              borderRadius: '20px',
-              fontSize: '0.66rem',
-              fontWeight: 700,
-              background: isProtected ? 'rgba(16, 185, 129, 0.15)' : 'rgba(239, 68, 68, 0.15)',
-              color: isProtected ? '#10b981' : '#ef4444',
-              border: `1px solid ${isProtected ? 'rgba(16, 185, 129, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`,
-              cursor: 'pointer',
-            }}
-            onClick={onToggleProtection}
-            title={
-              isProtected
-                ? 'Protected: Invisible to Google Meet, Zoom, Teams & screen shares. Click to toggle.'
-                : 'Unprotected: Screen capture protection disabled. Click to enable.'
-            }
-          >
-            {isProtected ? <ShieldCheck size={12} /> : <ShieldAlert size={12} />}
-            <span>{isProtected ? 'STEALTH ACTIVE' : 'STEALTH OFF'}</span>
-          </div>
+        {/* Listening status pill */}
+        <button
+          onClick={onToggleMicrophone}
+          style={{
+            ...iconButton(isMicActive),
+            padding: '0 12px 0 10px',
+            gap: '8px',
+            background: isMicActive ? 'rgba(125, 211, 252, 0.12)' : 'rgba(239, 68, 68, 0.12)',
+            color: isMicActive ? ACCENT : '#f87171',
+          }}
+          title={isMicActive ? 'Listening. Click to mute the microphone.' : 'Microphone is off. Click to start listening.'}
+        >
+          {isMicActive ? <Mic size={13} /> : <MicOff size={13} />}
+          <ListeningWave level={audioLevel} active={isListening} />
+          <span>{isListening ? 'Listening' : 'Paused'}</span>
+        </button>
 
-          <span style={{ fontSize: '0.72rem', color: '#94a3b8', fontWeight: 600 }}>
-            {session?.title || 'SideBro Copilot'}
-          </span>
-        </div>
+        <button
+          onClick={onToggleMicRole}
+          style={iconButton(micRole === 'OTHER')}
+          title="Toggle whether microphone speech is the interviewer (answers are generated) or you (context only)."
+        >
+          {micRole === 'OTHER' ? <Users size={13} /> : <User size={13} />}
+          <span>{micRole === 'OTHER' ? 'Interviewer' : 'You'}</span>
+        </button>
 
-        {/* Controls: Opacity & Window Restore */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', WebkitAppRegion: 'no-drag' } as React.CSSProperties}>
-          {/* Opacity Pill Buttons */}
-          <div style={{ display: 'flex', background: 'rgba(0,0,0,0.4)', borderRadius: '6px', padding: '2px' }}>
-            {[1.0, 0.85, 0.7].map((lvl) => (
-              <button
-                key={lvl}
-                onClick={() => handleOpacityChange(lvl)}
-                style={{
-                  background: opacityLevel === lvl ? 'rgba(0, 242, 254, 0.2)' : 'transparent',
-                  color: opacityLevel === lvl ? '#00f2fe' : '#64748b',
-                  border: 'none',
-                  padding: '2px 6px',
-                  borderRadius: '4px',
-                  fontSize: '0.62rem',
-                  fontWeight: 700,
-                  cursor: 'pointer',
-                }}
-                title={`Window Opacity: ${Math.round(lvl * 100)}%`}
-              >
-                {Math.round(lvl * 100)}%
-              </button>
-            ))}
-          </div>
+        <div style={{ flex: 1 }} />
 
-          {/* Restore / Expand to Full Window */}
+        {onCaptureScreenshot && (
           <button
-            onClick={onExitFloatingMode}
-            style={{
-              background: 'rgba(255, 255, 255, 0.08)',
-              border: 'none',
-              color: '#cbd5e1',
-              padding: '4px 6px',
-              borderRadius: '6px',
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-            }}
-            title="Expand to Full Window"
+            onClick={onCaptureScreenshot}
+            style={iconButton()}
+            title={`Solve the coding problem on screen (${modKey}+Alt+Shift+S)`}
           >
-            <Maximize2 size={13} />
+            <Camera size={13} />
+            <span>Screen</span>
           </button>
-        </div>
+        )}
+
+        <button
+          onClick={onToggleProtection}
+          style={{
+            ...iconButton(),
+            color: isProtected ? '#34d399' : '#f87171',
+            background: isProtected ? 'rgba(52, 211, 153, 0.1)' : 'rgba(248, 113, 113, 0.12)',
+          }}
+          title={
+            isProtected
+              ? 'Hidden from screen share (Meet, Zoom, Teams). Click to turn off.'
+              : 'Visible in screen share. Click to hide this window from captures.'
+          }
+        >
+          {isProtected ? <ShieldCheck size={13} /> : <ShieldAlert size={13} />}
+          {!isProtected && <span>Visible</span>}
+        </button>
+
+        <button onClick={cycleOpacity} style={iconButton(opacityLevel < 1)} title="Cycle window opacity">
+          <Eye size={13} />
+          <span>{Math.round(opacityLevel * 100)}%</span>
+        </button>
+
+        <button
+          onClick={() => setCollapsed(c => !c)}
+          style={iconButton()}
+          title={collapsed ? 'Expand answer card' : 'Collapse to bar'}
+        >
+          {collapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+        </button>
+
+        <button onClick={onExitFloatingMode} style={iconButton()} title="Back to full window">
+          <Maximize2 size={13} />
+        </button>
       </div>
 
-      {/* Audio & Mic Controls Strip */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          padding: '6px 12px',
-          background: 'rgba(10, 15, 24, 0.95)',
-          borderBottom: '1px solid rgba(255, 255, 255, 0.06)',
-          fontSize: '0.68rem',
-          flexWrap: 'wrap',
-          gap: '8px',
-        }}
-      >
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-          {/* Microphone On/Off Toggle Button */}
-          <button
-            onClick={onToggleMicrophone}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '4px',
-              background: isMicActive ? 'rgba(16, 185, 129, 0.18)' : 'rgba(239, 68, 68, 0.18)',
-              border: `1px solid ${isMicActive ? '#10b981' : '#ef4444'}`,
-              color: isMicActive ? '#10b981' : '#ef4444',
-              padding: '3px 8px',
-              borderRadius: '6px',
-              fontSize: '0.65rem',
-              fontWeight: 700,
-              cursor: 'pointer',
-            }}
-            title={isMicActive ? 'Microphone is listening. Click to mute.' : 'Microphone is OFF. Click to start listening.'}
-          >
-            {isMicActive ? <Mic size={11} /> : <MicOff size={11} />}
-            <span>{isMicActive ? 'MIC ACTIVE' : 'MIC OFF'}</span>
-          </button>
-
-          {/* Mic Role Toggle (Interviewer Q&A vs Candidate) */}
-          <button
-            onClick={onToggleMicRole}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: '4px',
-              background: micRole === 'OTHER' ? 'rgba(0, 242, 254, 0.15)' : 'rgba(255, 255, 255, 0.06)',
-              border: `1px solid ${micRole === 'OTHER' ? '#00f2fe' : 'rgba(255, 255, 255, 0.12)'}`,
-              color: micRole === 'OTHER' ? '#00f2fe' : '#94a3b8',
-              padding: '3px 8px',
-              borderRadius: '6px',
-              fontSize: '0.65rem',
-              fontWeight: 700,
-              cursor: 'pointer',
-            }}
-            title="Toggle whether microphone speech triggers interview questions (Interviewer mode) or represents your answers (Candidate mode)."
-          >
-            <span>Mic: {micRole === 'OTHER' ? 'Interviewer (Q&A)' : 'Candidate (YOU)'}</span>
-          </button>
-
-          {/* Volume Level Bar */}
-          {isMicActive && (
-            <div
-              style={{
-                width: '32px',
-                height: '4px',
-                background: 'rgba(255,255,255,0.1)',
-                borderRadius: '2px',
-                overflow: 'hidden',
-              }}
-            >
-              <div
-                style={{
-                  width: `${Math.min(100, micVolume * 100)}%`,
-                  height: '100%',
-                  background: micRole === 'OTHER' ? '#00f2fe' : '#10b981',
-                  transition: 'width 0.1s ease',
-                }}
-              />
-            </div>
-          )}
-        </div>
-
-        {/* Tab Switcher: Q&A Copilot vs Live Transcripts */}
-        <div style={{ display: 'flex', background: 'rgba(0,0,0,0.5)', borderRadius: '6px', padding: '2px' }}>
-          <button
-            onClick={() => setActiveTab('ANSWERS')}
-            style={{
-              background: activeTab === 'ANSWERS' ? 'rgba(0, 242, 254, 0.2)' : 'transparent',
-              color: activeTab === 'ANSWERS' ? '#00f2fe' : '#64748b',
-              border: 'none',
-              padding: '2px 8px',
-              borderRadius: '4px',
-              fontSize: '0.64rem',
-              fontWeight: 700,
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '4px',
-            }}
-          >
-            <Sparkles size={10} /> Q&A Answers
-          </button>
-          <button
-            onClick={() => setActiveTab('TRANSCRIPTS')}
-            style={{
-              background: activeTab === 'TRANSCRIPTS' ? 'rgba(0, 242, 254, 0.2)' : 'transparent',
-              color: activeTab === 'TRANSCRIPTS' ? '#00f2fe' : '#64748b',
-              border: 'none',
-              padding: '2px 8px',
-              borderRadius: '4px',
-              fontSize: '0.64rem',
-              fontWeight: 700,
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '4px',
-            }}
-          >
-            <MessageSquare size={10} /> Transcripts ({transcripts.length})
-          </button>
-        </div>
-      </div>
-
-      {/* Main Content Area */}
-      <div
-        style={{
-          flex: 1,
-          overflowY: 'auto',
-          padding: '10px 12px',
-          display: 'flex',
-          flexDirection: 'column',
-          gap: '10px',
-        }}
-      >
-        {activeTab === 'TRANSCRIPTS' ? (
-          /* Full Live Transcripts Stream */
-          <div
-            style={{
-              flex: 1,
-              background: 'rgba(10, 15, 24, 0.85)',
-              border: '1px solid rgba(255, 255, 255, 0.08)',
-              borderRadius: '10px',
-              padding: '12px',
-              display: 'flex',
-              flexDirection: 'column',
-              overflowY: 'auto',
-              gap: '8px',
-            }}
-          >
-            <div style={{ fontSize: '0.72rem', fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase' }}>
-              Live Speech Transcripts ({transcripts.length} utterances)
-            </div>
-
-            {transcripts.length === 0 ? (
-              <div
-                style={{
-                  flex: 1,
-                  display: 'flex',
-                  flexDirection: 'column',
-                  alignItems: 'center',
-                  justifyContent: 'center',
-                  color: '#64748b',
-                  fontSize: '0.75rem',
-                  textAlign: 'center',
-                  padding: '24px',
-                }}
-              >
-                <Mic size={24} style={{ opacity: 0.3, marginBottom: '8px' }} />
-                <span>Speak into your microphone or simulate speech. Live words will stream here.</span>
-              </div>
-            ) : (
-              transcripts.map((t, idx) => (
-                <div
-                  key={t.id || idx}
-                  style={{
-                    fontSize: '0.78rem',
-                    lineHeight: 1.4,
-                    padding: '6px 10px',
-                    borderRadius: '6px',
-                    background: t.speaker === 'OTHER' ? 'rgba(0, 242, 254, 0.05)' : 'rgba(16, 185, 129, 0.05)',
-                    borderLeft: `3px solid ${t.speaker === 'OTHER' ? '#00f2fe' : '#10b981'}`,
-                  }}
-                >
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '2px' }}>
-                    <span
-                      style={{
-                        fontSize: '0.62rem',
-                        fontWeight: 700,
-                        color: t.speaker === 'OTHER' ? '#00f2fe' : '#10b981',
-                      }}
-                    >
-                      {t.speaker === 'OTHER' ? 'INTERVIEWER' : 'YOU'}
-                    </span>
-                    <span style={{ fontSize: '0.6rem', color: '#64748b' }}>
-                      {new Date(t.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
-                    </span>
-                  </div>
-                  <div style={{ color: '#f1f5f9' }}>{t.text}</div>
-                </div>
-              ))
-            )}
-            <div ref={transcriptsEndRef} />
-          </div>
-        ) : (
-          /* Q&A Copilot View */
-          <>
-            {/* Current / Selected Question Card */}
-            <div
-              style={{
-                background: 'rgba(15, 23, 42, 0.75)',
-                border: '1px solid rgba(0, 242, 254, 0.2)',
-                borderRadius: '10px',
-                padding: '10px 12px',
-                position: 'relative',
-              }}
-            >
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  marginBottom: '6px',
-                }}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  <span
-                    style={{
-                      fontSize: '0.62rem',
-                      fontWeight: 700,
-                      textTransform: 'uppercase',
-                      background: 'rgba(0, 242, 254, 0.15)',
-                      color: '#00f2fe',
-                      padding: '2px 6px',
-                      borderRadius: '4px',
-                    }}
-                  >
-                    {displayedQuestion?.type || 'Live Question'}
-                  </span>
-                  {questions.length > 1 && (
-                    <span style={{ fontSize: '0.65rem', color: '#64748b' }}>
-                      ({(selectedQuestionIndex >= 0 ? selectedQuestionIndex : questions.length - 1) + 1} of {questions.length})
-                    </span>
-                  )}
-                </div>
-
-                {/* Pagination between questions if multiple exist */}
+      {!collapsed && (
+        <>
+          {/* Question header + view switcher */}
+          <div style={{ padding: '12px 18px 0', flexShrink: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '0.66rem', color: '#94a3b8', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                <span>{displayedQuestion ? displayedQuestion.type || 'Question' : 'Waiting for a question'}</span>
                 {questions.length > 1 && (
-                  <div style={{ display: 'flex', gap: '2px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '2px', textTransform: 'none' }}>
                     <button
-                      onClick={() => setSelectedQuestionIndex(Math.max(0, (selectedQuestionIndex >= 0 ? selectedQuestionIndex : questions.length - 1) - 1))}
-                      disabled={(selectedQuestionIndex >= 0 ? selectedQuestionIndex : questions.length - 1) === 0}
-                      style={{
-                        background: 'transparent',
-                        border: 'none',
-                        color: '#94a3b8',
-                        cursor: 'pointer',
-                        padding: '2px',
-                      }}
+                      onClick={() => setSelectedQuestionIndex(Math.max(0, questionPosition - 1))}
+                      disabled={questionPosition === 0}
+                      style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', padding: '1px', display: 'flex' }}
                     >
                       <ChevronLeft size={13} />
                     </button>
+                    <span>{questionPosition + 1}/{questions.length}</span>
                     <button
-                      onClick={() => setSelectedQuestionIndex(Math.min(questions.length - 1, (selectedQuestionIndex >= 0 ? selectedQuestionIndex : questions.length - 1) + 1))}
-                      disabled={(selectedQuestionIndex >= 0 ? selectedQuestionIndex : questions.length - 1) === questions.length - 1}
-                      style={{
-                        background: 'transparent',
-                        border: 'none',
-                        color: '#94a3b8',
-                        cursor: 'pointer',
-                        padding: '2px',
-                      }}
+                      onClick={() => setSelectedQuestionIndex(Math.min(questions.length - 1, questionPosition + 1))}
+                      disabled={questionPosition === questions.length - 1}
+                      style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer', padding: '1px', display: 'flex' }}
                     >
                       <ChevronRight size={13} />
                     </button>
@@ -521,152 +356,119 @@ export const FloatingOverlayView: React.FC<FloatingOverlayViewProps> = ({
                 )}
               </div>
 
-              <div
-                style={{
-                  fontSize: '0.88rem',
-                  fontWeight: 600,
-                  color: '#f8fafc',
-                  lineHeight: 1.4,
-                }}
-              >
-                {displayedQuestion ? (
-                  displayedQuestion.questionText
-                ) : (
-                  <div>
-                    <span style={{ color: '#94a3b8', fontSize: '0.78rem' }}>
-                      Listening for questions via microphone... Or test instantly:
-                    </span>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px', marginTop: '6px' }}>
-                      {sampleQuestions.map((sq, i) => (
-                        <button
-                          key={i}
-                          onClick={() => onManualAsk(sq)}
-                          style={{
-                            background: 'rgba(0, 242, 254, 0.1)',
-                            border: '1px solid rgba(0, 242, 254, 0.25)',
-                            color: '#38bdf8',
-                            fontSize: '0.66rem',
-                            fontWeight: 600,
-                            padding: '3px 8px',
-                            borderRadius: '6px',
-                            cursor: 'pointer',
-                            textAlign: 'left',
-                          }}
-                        >
-                          ⚡ {sq}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Streaming Answer Section */}
-            <div
-              style={{
-                flex: 1,
-                background: 'rgba(10, 15, 24, 0.85)',
-                border: '1px solid rgba(255, 255, 255, 0.08)',
-                borderRadius: '10px',
-                padding: '12px',
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '8px',
-                minHeight: '160px',
-              }}
-            >
-              {/* Header of Answer with Copy Button */}
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                  <Sparkles size={14} color="#00f2fe" />
-                  <span style={{ fontSize: '0.72rem', fontWeight: 700, color: '#00f2fe', textTransform: 'uppercase' }}>
-                    AI Wingman Answer {currentAnswer?.model ? `(${currentAnswer.model})` : ''}
-                  </span>
-                </div>
-
-                {currentAnswer && (
+              <div style={{ display: 'flex', background: 'rgba(0, 0, 0, 0.25)', borderRadius: '999px', padding: '2px' }}>
+                {([
+                  { id: 'ANSWERS' as const, label: 'Answer', Icon: Sparkles },
+                  { id: 'TRANSCRIPTS' as const, label: `Transcript${transcripts.length ? ` · ${transcripts.length}` : ''}`, Icon: MessageSquare },
+                ]).map(({ id, label, Icon }) => (
                   <button
-                    onClick={handleCopyAnswer}
+                    key={id}
+                    onClick={() => setActiveTab(id)}
                     style={{
                       display: 'flex',
                       alignItems: 'center',
                       gap: '4px',
-                      background: 'rgba(255, 255, 255, 0.05)',
-                      border: '1px solid rgba(255, 255, 255, 0.1)',
-                      color: copied ? '#10b981' : '#94a3b8',
-                      padding: '3px 8px',
-                      borderRadius: '6px',
-                      fontSize: '0.65rem',
+                      background: activeTab === id ? 'rgba(255, 255, 255, 0.12)' : 'transparent',
+                      color: activeTab === id ? '#f8fafc' : '#94a3b8',
+                      border: 'none',
+                      padding: '3px 10px',
+                      borderRadius: '999px',
+                      fontSize: '0.66rem',
+                      fontWeight: 600,
                       cursor: 'pointer',
                     }}
                   >
-                    {copied ? <Check size={11} /> : <Copy size={11} />}
-                    <span>{copied ? 'Copied' : 'Copy'}</span>
+                    <Icon size={10} /> {label}
                   </button>
+                ))}
+              </div>
+            </div>
+
+            {activeTab === 'ANSWERS' && (
+              <div style={{ fontSize: '0.95rem', fontWeight: 600, color: '#f8fafc', lineHeight: 1.4 }}>
+                {displayedQuestion ? (
+                  displayedQuestion.questionText
+                ) : (
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                    {sampleQuestions.map((sq, i) => (
+                      <button
+                        key={i}
+                        className="sb-chip"
+                        onClick={() => onManualAsk(sq)}
+                        style={{
+                          background: 'rgba(255, 255, 255, 0.06)',
+                          border: '1px solid rgba(255, 255, 255, 0.08)',
+                          color: '#cbd5e1',
+                          fontSize: '0.7rem',
+                          fontWeight: 500,
+                          padding: '4px 10px',
+                          borderRadius: '999px',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {sq}
+                      </button>
+                    ))}
+                  </div>
                 )}
               </div>
+            )}
+          </div>
 
-              {/* Answer Body */}
-              <div
-                style={{
-                  flex: 1,
-                  overflowY: 'auto',
-                  fontSize: '0.82rem',
-                  lineHeight: 1.5,
-                  color: '#e2e8f0',
-                }}
-              >
+          {/* Main content */}
+          <div
+            className="sb-overlay-scroll"
+            style={{ flex: 1, overflowY: 'auto', padding: '12px 18px', display: 'flex', flexDirection: 'column', gap: '10px' }}
+          >
+            {activeTab === 'TRANSCRIPTS' ? (
+              transcripts.length === 0 ? (
+                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: '#64748b', fontSize: '0.78rem', textAlign: 'center' }}>
+                  <Mic size={22} style={{ opacity: 0.35, marginBottom: '8px' }} />
+                  <span>Live speech will stream here as the conversation happens.</span>
+                </div>
+              ) : (
+                <>
+                  {transcripts.map((t, idx) => (
+                    <div key={t.id || idx} style={{ fontSize: '0.82rem', lineHeight: 1.45 }}>
+                      <span style={{ fontSize: '0.64rem', fontWeight: 700, marginRight: '8px', color: t.speaker === 'OTHER' ? ACCENT : '#34d399' }}>
+                        {t.speaker === 'OTHER' ? 'INTERVIEWER' : 'YOU'}
+                      </span>
+                      <span style={{ color: '#e2e8f0' }}>{t.text}</span>
+                    </div>
+                  ))}
+                  <div ref={transcriptsEndRef} />
+                </>
+              )
+            ) : (
+              <>
                 {currentAnswer ? (
-                  <>
-                    {/* Direct Summary Callout Box */}
+                  <div style={{ fontSize: '0.9rem', lineHeight: 1.6, color: '#e2e8f0' }}>
                     {currentAnswer.directAnswer && (
-                      <div style={{
-                        background: 'rgba(0, 242, 254, 0.08)',
-                        border: '1px solid rgba(0, 242, 254, 0.25)',
-                        borderRadius: '8px',
-                        padding: '8px 10px',
-                        marginBottom: '8px',
-                      }}>
-                        <span style={{
-                          display: 'block',
-                          fontSize: '0.64rem',
-                          fontWeight: 700,
-                          textTransform: 'uppercase',
-                          letterSpacing: '0.08em',
-                          color: '#38bdf8',
-                          marginBottom: '3px',
-                        }}>
-                          Direct Summary (5-sec scan)
-                        </span>
-                        <div style={{ color: '#f8fafc', fontWeight: 500, fontSize: '0.86rem' }}>
-                          <FormattedText text={currentAnswer.directAnswer} />
-                        </div>
+                      <div style={{ color: '#f8fafc', fontWeight: 500, fontSize: '0.98rem', marginBottom: '10px' }}>
+                        <FormattedText text={currentAnswer.directAnswer} />
                       </div>
                     )}
 
-                    {/* Key Points Bullets */}
                     {currentAnswer.keyPoints && currentAnswer.keyPoints.length > 0 && (
-                      <ul style={{ paddingLeft: '16px', margin: '6px 0', color: '#cbd5e1' }}>
+                      <ul style={{ paddingLeft: '18px', margin: '4px 0 8px', color: '#cbd5e1' }}>
                         {currentAnswer.keyPoints.map((pt, idx) => (
-                          <li key={idx} style={{ marginBottom: '4px' }}>
+                          <li key={idx} style={{ marginBottom: '5px' }}>
                             <FormattedText text={pt} />
                           </li>
                         ))}
                       </ul>
                     )}
 
-                    {/* Code Snippet or Example if present */}
                     {currentAnswer.exampleOrSnippet && (
                       <pre
                         style={{
-                          background: '#040711',
-                          border: '1px solid rgba(0, 242, 254, 0.15)',
-                          borderRadius: '6px',
-                          padding: '8px',
-                          fontSize: '0.72rem',
+                          background: 'rgba(0, 0, 0, 0.35)',
+                          border: '1px solid rgba(255, 255, 255, 0.08)',
+                          borderRadius: '10px',
+                          padding: '10px 12px',
+                          fontSize: '0.76rem',
                           fontFamily: 'var(--font-mono)',
-                          color: '#38bdf8',
+                          color: '#bae6fd',
                           overflowX: 'auto',
                           margin: '8px 0',
                         }}
@@ -677,120 +479,123 @@ export const FloatingOverlayView: React.FC<FloatingOverlayViewProps> = ({
 
                     {/* Full streaming markdown if direct answer is not yet parsed */}
                     {!currentAnswer.directAnswer && currentAnswer.fullContent && (
-                      <div style={{ whiteSpace: 'pre-wrap', color: '#cbd5e1' }}>
+                      <div style={{ whiteSpace: 'pre-wrap' }}>
                         <FormattedText text={currentAnswer.fullContent} />
                       </div>
                     )}
-                  </>
+
+                    {!currentAnswer.isComplete && (
+                      <span style={{ display: 'inline-block', width: '7px', height: '14px', background: ACCENT, borderRadius: '1px', animation: 'sb-pulse 0.9s ease-in-out infinite', verticalAlign: 'middle' }} />
+                    )}
+                  </div>
                 ) : (
-                  <div
-                    style={{
-                      height: '100%',
-                      display: 'flex',
-                      flexDirection: 'column',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      color: '#64748b',
-                      fontSize: '0.75rem',
-                      textAlign: 'center',
-                      padding: '16px',
-                    }}
-                  >
-                    <Zap size={22} style={{ opacity: 0.3, marginBottom: '8px' }} />
-                    <span>Real-time AI answers stream here when questions are asked or typed.</span>
+                  <div style={{ flex: 1, minHeight: '120px', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: '#64748b', fontSize: '0.78rem', textAlign: 'center' }}>
+                    <Zap size={22} style={{ opacity: 0.35, marginBottom: '8px' }} />
+                    <span>Answers appear here the moment a question is heard or typed.</span>
                   </div>
                 )}
-              </div>
 
-              {/* Quick Modifier Action Chips */}
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '4px',
-                  flexWrap: 'wrap',
-                  paddingTop: '6px',
-                  borderTop: '1px solid rgba(255, 255, 255, 0.06)',
-                }}
-              >
+                {/* Clipboard / screenshot solutions, shown only once something was copied or captured */}
+                {(['clipboard', 'screen'] as const).map(source => (
+                  <CodingAnswerPanel
+                    key={source}
+                    source={source}
+                    lane={codingLanes[source]}
+                    onDismiss={() => onDismissCodingLane(source)}
+                    compact
+                  />
+                ))}
+              </>
+            )}
+          </div>
+
+          {/* Follow-up chips + silent ask */}
+          <div style={{ padding: '8px 14px 10px', borderTop: '1px solid rgba(255, 255, 255, 0.07)', flexShrink: 0, display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            {activeTab === 'ANSWERS' && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '5px', flexWrap: 'wrap' }}>
                 {[
                   { id: 'shorter' as const, label: 'Shorter' },
-                  { id: 'expand' as const, label: 'Explain' },
+                  { id: 'expand' as const, label: 'Explain more' },
                   { id: 'example' as const, label: 'Example' },
-                  { id: 'technical_detail' as const, label: 'Tech Detail' },
-                  { id: 'star' as const, label: 'STAR Story' },
+                  { id: 'technical_detail' as const, label: 'Go technical' },
+                  { id: 'star' as const, label: 'STAR story' },
                 ].map((chip) => (
                   <button
                     key={chip.id}
+                    className="sb-chip"
                     onClick={() => onTriggerModifier(chip.id)}
                     disabled={!currentAnswer}
                     style={{
-                      background: 'rgba(255, 255, 255, 0.04)',
-                      border: '1px solid rgba(255, 255, 255, 0.08)',
-                      color: currentAnswer ? '#94a3b8' : '#475569',
-                      padding: '3px 7px',
-                      borderRadius: '4px',
-                      fontSize: '0.62rem',
-                      fontWeight: 600,
+                      background: 'rgba(255, 255, 255, 0.05)',
+                      border: '1px solid rgba(255, 255, 255, 0.07)',
+                      color: currentAnswer ? '#cbd5e1' : '#475569',
+                      padding: '3px 10px',
+                      borderRadius: '999px',
+                      fontSize: '0.66rem',
+                      fontWeight: 500,
                       cursor: currentAnswer ? 'pointer' : 'not-allowed',
-                      transition: 'all 0.15s ease',
                     }}
                   >
                     {chip.label}
                   </button>
                 ))}
+                <div style={{ flex: 1 }} />
+                {currentAnswer && (
+                  <button onClick={handleCopyAnswer} style={{ ...iconButton(), height: '24px', color: copied ? '#34d399' : '#94a3b8' }}>
+                    {copied ? <Check size={11} /> : <Copy size={11} />}
+                    <span>{copied ? 'Copied' : 'Copy'}</span>
+                  </button>
+                )}
               </div>
-            </div>
-          </>
-        )}
-      </div>
+            )}
 
-      {/* Quick Silent Ask Input Footer */}
-      <form
-        onSubmit={handleManualSubmit}
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          gap: '6px',
-          padding: '8px 12px',
-          background: 'rgba(15, 23, 42, 0.95)',
-          borderTop: '1px solid rgba(255, 255, 255, 0.08)',
-        }}
-      >
-        <input
-          type="text"
-          value={customQuery}
-          onChange={(e) => setCustomQuery(e.target.value)}
-          placeholder="Ask AI question silently or paste prompt..."
-          style={{
-            flex: 1,
-            background: 'rgba(0, 0, 0, 0.4)',
-            border: '1px solid rgba(255, 255, 255, 0.1)',
-            borderRadius: '6px',
-            padding: '6px 10px',
-            fontSize: '0.75rem',
-            color: '#f8fafc',
-            outline: 'none',
-          }}
-        />
-        <button
-          type="submit"
-          disabled={!customQuery.trim()}
-          style={{
-            background: customQuery.trim() ? '#00f2fe' : 'rgba(255, 255, 255, 0.1)',
-            color: customQuery.trim() ? '#051020' : '#64748b',
-            border: 'none',
-            borderRadius: '6px',
-            padding: '6px 10px',
-            cursor: customQuery.trim() ? 'pointer' : 'default',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-          }}
-        >
-          <Send size={12} />
-        </button>
-      </form>
+            <form onSubmit={handleManualSubmit} style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+              <input
+                type="text"
+                value={customQuery}
+                onChange={(e) => setCustomQuery(e.target.value)}
+                placeholder="Ask anything silently…"
+                style={{
+                  flex: 1,
+                  background: 'rgba(0, 0, 0, 0.28)',
+                  border: '1px solid rgba(255, 255, 255, 0.08)',
+                  borderRadius: '999px',
+                  padding: '7px 14px',
+                  fontSize: '0.78rem',
+                  color: '#f8fafc',
+                  outline: 'none',
+                }}
+              />
+              <button
+                type="submit"
+                disabled={!customQuery.trim()}
+                style={{
+                  width: '32px',
+                  height: '32px',
+                  borderRadius: '999px',
+                  border: 'none',
+                  background: customQuery.trim() ? ACCENT : 'rgba(255, 255, 255, 0.08)',
+                  color: customQuery.trim() ? '#0b1220' : '#64748b',
+                  cursor: customQuery.trim() ? 'pointer' : 'default',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                }}
+              >
+                <Send size={13} />
+              </button>
+            </form>
+
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.6rem', color: '#64748b' }}>
+              <span>{modKey}+\ hide · {modKey}+Alt+Shift+S screenshot</span>
+              <span>
+                {currentAnswer?.model ? `${currentAnswer.model} · ` : ''}
+                {latencyMs > 0 ? `${latencyMs}ms` : session?.title || 'SideBro'}
+              </span>
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 };

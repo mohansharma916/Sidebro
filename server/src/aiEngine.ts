@@ -1,4 +1,4 @@
-import { AnswerLengthMode, DetectedQuestion, GeneratedAnswer, SessionType } from './types.js';
+import { AnswerLengthMode, AnswerSource, DetectedQuestion, GeneratedAnswer, SessionType } from './types.js';
 import { DocumentChunk } from './contextEngine.js';
 
 import dns from 'dns';
@@ -19,6 +19,26 @@ try {
 /** Hard cap on a single answer stream, so a hung provider never blocks forever. */
 const PROVIDER_TIMEOUT_MS = 45_000;
 const OFFLINE_MODEL = 'offline-templates (no AI provider configured)';
+const GROQ_CHAT_URL = 'https://api.groq.com/openai/v1/chat/completions';
+/** Coding solutions carry full code plus explanation, so they get far more room than spoken answers. */
+const CODING_MAX_TOKENS = 3000;
+
+/** One user turn: text plus an optional base64 image (screenshots). */
+interface ChatInput {
+  text: string;
+  image?: { base64: string; mimeType: string };
+}
+
+/** Input for a coding solution: copied text, or a screenshot of the candidate's screen. */
+export type CodingInput =
+  | { kind: 'text'; text: string }
+  | { kind: 'image'; base64: string; mimeType: string };
+
+interface ProviderRun {
+  name: string;
+  model: string;
+  run: (sig: AbortSignal) => Promise<void>;
+}
 
 /** Tracks whether a provider already emitted tokens, so we never splice two providers' output together. */
 interface StreamState {
@@ -85,6 +105,10 @@ export class AIEngine {
   private openaiModel: string;
   private openaiBaseUrl: string;
   private preferredProvider: string | undefined;
+  private openaiVisionModel: string;
+  private groqVisionModel: string | undefined;
+  private preferredVisionProvider: string | undefined;
+  private codingLanguage: string;
 
   constructor() {
     this.groqApiKey = process.env.GROQ_API_KEY;
@@ -95,6 +119,12 @@ export class AIEngine {
     this.openaiModel = process.env.OPENAI_MODEL || 'gpt-4o-mini';
     this.openaiBaseUrl = (process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(/\/+$/, '');
     this.preferredProvider = process.env.AI_PROVIDER?.toLowerCase();
+    // Screenshots need a model that reads images. gpt-4o-mini and Gemini Flash both do; Groq only
+    // with an explicitly configured vision model (the default Groq text model cannot see images).
+    this.openaiVisionModel = process.env.OPENAI_VISION_MODEL || this.openaiModel;
+    this.groqVisionModel = process.env.GROQ_VISION_MODEL || undefined;
+    this.preferredVisionProvider = (process.env.VISION_PROVIDER || process.env.AI_PROVIDER)?.toLowerCase();
+    this.codingLanguage = process.env.CODING_LANGUAGE || 'Go';
   }
 
   /**
@@ -141,6 +171,7 @@ export class AIEngine {
       model: defaultModel,
       contextUsed: contextChunks.map(c => c.source),
       timestamp: Date.now(),
+      source: question.source,
     };
 
     const state: StreamState = { accumulated: '', emitted: false };
@@ -175,7 +206,7 @@ export class AIEngine {
 
     callbacks.onStart(answer);
 
-    const providers: { id: string; name: string; model: string; run: (sig: AbortSignal) => Promise<void> }[] = [];
+    const providers: (ProviderRun & { id: string })[] = [];
     if (this.groqApiKey) {
       providers.push({
         id: 'groq',
@@ -210,33 +241,8 @@ export class AIEngine {
       });
     }
 
-    let lastError: any;
-    for (const provider of providers) {
-      const sig = signal
-        ? AbortSignal.any([signal, AbortSignal.timeout(PROVIDER_TIMEOUT_MS)])
-        : AbortSignal.timeout(PROVIDER_TIMEOUT_MS);
-      try {
-        answer.model = provider.model;
-        await provider.run(sig);
-        this.finish(answer, state, startTime, callbacks, true);
-        return;
-      } catch (err) {
-        lastError = err;
-        if (signal?.aborted) {
-          // Superseded by a newer question: keep whatever was streamed so far.
-          this.finish(answer, state, startTime, callbacks, true);
-          return;
-        }
-        if (state.emitted) {
-          // Failed mid-stream. Falling back now would splice two different answers together.
-          console.warn(`[AIEngine] ${provider.name} stream failed after output started:`, (err as Error)?.message);
-          this.finish(answer, state, startTime, callbacks, true);
-          callbacks.onError(new Error(`${provider.name} stream was interrupted; the answer may be incomplete.`));
-          return;
-        }
-        console.warn(`[AIEngine] ${provider.name} failed before output, trying next provider:`, (err as Error)?.message);
-      }
-    }
+    const lastError = await this.runProviderChain(providers, answer, state, startTime, callbacks, signal);
+    if (lastError === undefined) return;
 
     // Every configured provider failed before producing output.
     answer.model = OFFLINE_MODEL;
@@ -247,9 +253,196 @@ export class AIEngine {
     answer.keyPoints = structured.keyPoints;
     answer.exampleOrSnippet = structured.exampleOrSnippet;
     answer.followUpQuestions = structured.followUpQuestions;
-    callbacks.onError(new Error(`AI provider unavailable (${lastError?.message || 'unknown error'}); showing offline template.`));
+    callbacks.onError(new Error(`AI provider unavailable (${(lastError as Error)?.message || 'unknown error'}); showing offline template.`));
     await this.simulateTokenStream(structured.fullContent, emit, signal);
     this.finish(answer, state, startTime, callbacks, false);
+  }
+
+  /**
+   * Runs providers in order until one streams a full answer. Returns undefined when the answer was
+   * finished (including partial output after an abort or a mid-stream failure), or the last error
+   * when every provider failed before producing any output.
+   */
+  private async runProviderChain(
+    providers: ProviderRun[],
+    answer: GeneratedAnswer,
+    state: StreamState,
+    startTime: number,
+    callbacks: AnswerStreamCallbacks,
+    signal?: AbortSignal
+  ): Promise<unknown> {
+    let lastError: unknown = new Error('No AI provider configured');
+    for (const provider of providers) {
+      const sig = signal
+        ? AbortSignal.any([signal, AbortSignal.timeout(PROVIDER_TIMEOUT_MS)])
+        : AbortSignal.timeout(PROVIDER_TIMEOUT_MS);
+      try {
+        answer.model = provider.model;
+        await provider.run(sig);
+        this.finish(answer, state, startTime, callbacks, true);
+        return undefined;
+      } catch (err) {
+        lastError = err ?? new Error('Unknown provider error');
+        if (signal?.aborted) {
+          // Superseded by a newer question: keep whatever was streamed so far.
+          this.finish(answer, state, startTime, callbacks, true);
+          return undefined;
+        }
+        if (state.emitted) {
+          // Failed mid-stream. Falling back now would splice two different answers together.
+          console.warn(`[AIEngine] ${provider.name} stream failed after output started:`, (err as Error)?.message);
+          this.finish(answer, state, startTime, callbacks, true);
+          callbacks.onError(new Error(`${provider.name} stream was interrupted; the answer may be incomplete.`));
+          return undefined;
+        }
+        console.warn(`[AIEngine] ${provider.name} failed before output, trying next provider:`, (err as Error)?.message);
+      }
+    }
+    return lastError;
+  }
+
+  /**
+   * Streams a coding solution (pattern, approach, code, complexity) for copied text or a screenshot.
+   * Uses its own prompt and token budget; screenshots go only to vision-capable providers.
+   */
+  public async streamCodingAnswer(
+    question: DetectedQuestion,
+    input: CodingInput,
+    recentTranscripts: { speaker: string; text: string }[],
+    callbacks: AnswerStreamCallbacks,
+    preferredLanguage?: string,
+    signal?: AbortSignal
+  ): Promise<void> {
+    const startTime = Date.now();
+    const answer: GeneratedAnswer = {
+      id: `ans-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      questionId: question.id,
+      sessionId: question.sessionId,
+      questionText: question.questionText,
+      directAnswer: '',
+      keyPoints: [],
+      followUpQuestions: [],
+      fullContent: '',
+      isComplete: false,
+      lengthMode: 'detailed',
+      model: '',
+      timestamp: Date.now(),
+      source: question.source,
+    };
+    const state: StreamState = { accumulated: '', emitted: false };
+    const emit = (token: string) => {
+      if (!token) return;
+      if (!state.emitted) {
+        answer.firstTokenLatencyMs = Date.now() - startTime;
+        state.emitted = true;
+      }
+      state.accumulated += token;
+      callbacks.onToken(token);
+    };
+
+    const language = preferredLanguage || this.codingLanguage;
+    const systemPrompt = this.buildCodingSystemPrompt(language);
+    // Small models drift to Python unless the language rule is repeated next to the problem.
+    const languageRule = `Write the code in ${language} unless the problem, starter code, or editor clearly uses another language.`;
+    const conversation = recentTranscripts.slice(-4).map(t => `${t.speaker}: ${t.text}`).join('\n');
+    const chatInput: ChatInput = input.kind === 'image'
+      ? {
+          text: `${conversation ? `Recent interview conversation:\n${conversation}\n\n` : ''}The attached image is a screenshot of the candidate's screen. Find the coding problem (and any code already written) and solve it. ${languageRule}`,
+          image: { base64: input.base64, mimeType: input.mimeType },
+        }
+      : {
+          text: `${conversation ? `Recent interview conversation:\n${conversation}\n\n` : ''}The candidate copied this text:\n\"\"\"\n${input.text}\n\"\"\"\n\n${languageRule}`,
+        };
+    const options = { temperature: 0.3, maxTokens: CODING_MAX_TOKENS };
+
+    const providers: (ProviderRun & { id: string })[] = [];
+    const openaiConfigured = !!(this.openaiApiKey || process.env.OPENAI_BASE_URL);
+    const openaiName = this.openaiBaseUrl.includes('openai.com') ? 'OpenAI' : 'Custom';
+    if (input.kind === 'image') {
+      if (openaiConfigured) {
+        providers.push({
+          id: 'openai',
+          name: openaiName,
+          model: `${this.openaiVisionModel} (${openaiName})`,
+          run: sig => this.streamChatCompletions(
+            { label: 'OpenAI-compatible API', url: `${this.openaiBaseUrl}/chat/completions`, apiKey: this.openaiApiKey, model: this.openaiVisionModel },
+            systemPrompt, chatInput, options, emit, sig
+          ),
+        });
+      }
+      if (this.geminiApiKey) {
+        providers.push({
+          id: 'gemini',
+          name: 'Gemini',
+          model: this.geminiModel,
+          run: sig => this.streamGemini(this.geminiModel, systemPrompt, chatInput, options, emit, sig),
+        });
+      }
+      if (this.groqApiKey && this.groqVisionModel) {
+        const model = this.groqVisionModel;
+        providers.push({
+          id: 'groq',
+          name: 'Groq',
+          model: `${model} (Groq)`,
+          run: sig => this.streamChatCompletions(
+            { label: 'Groq API', url: GROQ_CHAT_URL, apiKey: this.groqApiKey, model },
+            systemPrompt, chatInput, options, emit, sig
+          ),
+        });
+      }
+    } else {
+      if (this.groqApiKey) {
+        providers.push({
+          id: 'groq',
+          name: 'Groq',
+          model: `${this.groqModel} (Groq)`,
+          run: sig => this.streamChatCompletions(
+            { label: 'Groq API', url: GROQ_CHAT_URL, apiKey: this.groqApiKey, model: this.groqModel },
+            systemPrompt, chatInput, options, emit, sig
+          ),
+        });
+      }
+      if (openaiConfigured) {
+        providers.push({
+          id: 'openai',
+          name: openaiName,
+          model: `${this.openaiModel} (${openaiName})`,
+          run: sig => this.streamChatCompletions(
+            { label: 'OpenAI-compatible API', url: `${this.openaiBaseUrl}/chat/completions`, apiKey: this.openaiApiKey, model: this.openaiModel },
+            systemPrompt, chatInput, options, emit, sig
+          ),
+        });
+      }
+      if (this.geminiApiKey) {
+        providers.push({
+          id: 'gemini',
+          name: 'Gemini',
+          model: this.geminiModel,
+          run: sig => this.streamGemini(this.geminiModel, systemPrompt, chatInput, options, emit, sig),
+        });
+      }
+    }
+
+    const preferred = input.kind === 'image' ? this.preferredVisionProvider : this.preferredProvider;
+    if (preferred) {
+      providers.sort((a, b) => (a.id === preferred ? -1 : b.id === preferred ? 1 : 0));
+    }
+
+    answer.model = providers[0]?.model || OFFLINE_MODEL;
+    callbacks.onStart(answer);
+    const lastError = await this.runProviderChain(providers, answer, state, startTime, callbacks, signal);
+    if (lastError === undefined) return;
+
+    // Nothing was produced: show why in the panel instead of leaving it empty.
+    answer.model = OFFLINE_MODEL;
+    const reason = providers.length === 0
+      ? input.kind === 'image'
+        ? 'No vision-capable AI provider is configured. Set OPENAI_API_KEY or GEMINI_API_KEY (or GROQ_VISION_MODEL) to solve problems from screenshots.'
+        : 'No AI provider is configured. Set GROQ_API_KEY, OPENAI_API_KEY or GEMINI_API_KEY.'
+      : `AI provider unavailable (${(lastError as Error)?.message || 'unknown error'}).`;
+    emit(`### Direct Answer\n${reason}\n`);
+    this.finish(answer, state, startTime, callbacks, true);
+    callbacks.onError(new Error(reason));
   }
 
   private finish(
@@ -740,6 +933,53 @@ CRITICAL RULES:
 2. [Second realistic follow-up question]`;
   }
 
+  private buildCodingSystemPrompt(defaultLanguage: string): string {
+    return `You are SideBro AI, helping a candidate in a live coding interview. You receive either text the candidate copied (often a problem the interviewer pasted in the meeting chat) or a screenshot of the candidate's screen.
+
+FIRST, WORK OUT WHAT IS BEING ASKED:
+- A problem statement: solve it.
+- A problem plus code the candidate already wrote (possibly incomplete or buggy): complete or fix THEIR code, keeping their structure, names, and function signature.
+- Code with no problem statement: explain what it does, point out bugs or edge cases it misses, and give a corrected version.
+- A screenshot: ignore unrelated UI (browser chrome, video tiles, docks, notifications, chat names). Read the problem statement, examples, constraints, and any starter code carefully.
+- If the input is clearly not about code at all, say so in one line under Direct Answer and stop.
+
+LANGUAGE:
+- If the problem, starter code, or editor shows a language, use exactly that language and the given signature.
+- Otherwise write the solution in ${defaultLanguage}.
+
+QUALITY RULES:
+- The code must be complete, correct, and runnable for the stated constraints. Prefer the optimal approach the interviewer expects.
+- Keep explanations short, plain, and spoken: the candidate should be able to say them aloud while coding.
+- No preambles ("Sure", "Great question"). No meta-talk about the screenshot or the candidate.
+
+FORMAT EXACTLY WITH THESE MARKDOWN HEADERS:
+### Direct Answer
+[1-2 sentences: what the problem asks and the key insight / pattern, e.g. "Sliding window over the string, tracking the last index of each character."]
+
+### Key Points
+• Pattern: [name of the pattern, e.g. Two Pointers, Sliding Window, BFS, DP, Heap, Union-Find, Binary Search on answer]
+• Brute force: [idea in one line, with its complexity]
+• Optimal: [step 1 of the approach, in plain words]
+• [step 2, and further steps as needed]
+• Edge cases: [empty input, duplicates, negatives, overflow, ...]
+
+### Code / Implementation Blueprint
+\`\`\`[language]
+[full solution with brief comments on the key lines]
+\`\`\`
+
+### Complexity
+• Time: O(...) because ...
+• Space: O(...) because ...
+
+### Dry Run
+[Walk one small example through the code in 3-5 short lines.]
+
+### Anticipated Follow-up Questions
+1. [A likely follow-up, e.g. a variant or constraint change, with a one-line hint]
+2. [Second follow-up with a one-line hint]`;
+  }
+
   private buildUserPrompt(questionText: string, recentTranscripts: { speaker: string; text: string }[]): string {
     return `Recent conversation context:
 ${recentTranscripts.slice(-4).map(t => `${t.speaker}: ${t.text}`).join('\n')}
@@ -785,8 +1025,78 @@ Speak in a natural, human conversational tone like an experienced senior enginee
     emit: (token: string) => void,
     signal: AbortSignal
   ): Promise<void> {
+    await this.streamGemini(
+      this.geminiModel,
+      this.buildSystemPrompt(sessionType, lengthMode, contextSummary, modifier),
+      { text: this.buildUserPrompt(questionText, recentTranscripts) },
+      { temperature: 0.65, maxTokens: lengthMode === 'quick' ? 400 : 1100 },
+      emit,
+      signal
+    );
+  }
+
+  /**
+   * Stream from Groq's OpenAI-compatible chat completions API.
+   */
+  private async streamFromGroq(
+    questionText: string,
+    sessionType: SessionType,
+    lengthMode: AnswerLengthMode,
+    contextSummary: string,
+    recentTranscripts: { speaker: string; text: string }[],
+    modifier: string | undefined,
+    emit: (token: string) => void,
+    signal: AbortSignal
+  ): Promise<void> {
+    await this.streamChatCompletions(
+      { label: 'Groq API', url: GROQ_CHAT_URL, apiKey: this.groqApiKey, model: this.groqModel },
+      this.buildSystemPrompt(sessionType, lengthMode, contextSummary, modifier),
+      { text: this.buildUserPrompt(questionText, recentTranscripts) },
+      { temperature: 0.65, maxTokens: lengthMode === 'quick' ? 300 : lengthMode === 'detailed' ? 850 : 550 },
+      emit,
+      signal
+    );
+  }
+
+  /**
+   * Stream from OpenAI or any OpenAI-compatible API (Ollama, DeepSeek, OpenRouter, Together AI).
+   */
+  private async streamFromOpenAI(
+    questionText: string,
+    sessionType: SessionType,
+    lengthMode: AnswerLengthMode,
+    contextSummary: string,
+    recentTranscripts: { speaker: string; text: string }[],
+    modifier: string | undefined,
+    emit: (token: string) => void,
+    signal: AbortSignal
+  ): Promise<void> {
+    await this.streamChatCompletions(
+      { label: 'OpenAI-compatible API', url: `${this.openaiBaseUrl}/chat/completions`, apiKey: this.openaiApiKey, model: this.openaiModel },
+      this.buildSystemPrompt(sessionType, lengthMode, contextSummary, modifier),
+      { text: this.buildUserPrompt(questionText, recentTranscripts) },
+      { temperature: 0.65, maxTokens: lengthMode === 'quick' ? 300 : lengthMode === 'detailed' ? 850 : 550 },
+      emit,
+      signal
+    );
+  }
+
+  /**
+   * Streams one chat completion from Gemini. An attached image is sent inline.
+   */
+  private async streamGemini(
+    model: string,
+    systemPrompt: string,
+    input: ChatInput,
+    options: { temperature: number; maxTokens: number },
+    emit: (token: string) => void,
+    signal: AbortSignal
+  ): Promise<void> {
+    const parts: any[] = [{ text: input.text }];
+    if (input.image) parts.push({ inlineData: { mimeType: input.image.mimeType, data: input.image.base64 } });
+
     const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(this.geminiModel)}:streamGenerateContent?alt=sse`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`,
       {
         method: 'POST',
         headers: {
@@ -794,9 +1104,9 @@ Speak in a natural, human conversational tone like an experienced senior enginee
           'x-goog-api-key': this.geminiApiKey as string,
         },
         body: JSON.stringify({
-          systemInstruction: { parts: [{ text: this.buildSystemPrompt(sessionType, lengthMode, contextSummary, modifier) }] },
-          contents: [{ role: 'user', parts: [{ text: this.buildUserPrompt(questionText, recentTranscripts) }] }],
-          generationConfig: { temperature: 0.65, maxOutputTokens: lengthMode === 'quick' ? 400 : 1100 },
+          systemInstruction: { parts: [{ text: systemPrompt }] },
+          contents: [{ role: 'user', parts }],
+          generationConfig: { temperature: options.temperature, maxOutputTokens: options.maxTokens },
         }),
         signal,
       }
@@ -819,89 +1129,45 @@ Speak in a natural, human conversational tone like an experienced senior enginee
   }
 
   /**
-   * Stream from Groq's OpenAI-compatible chat completions API.
+   * Streams one chat completion from an OpenAI-compatible endpoint (OpenAI, Groq, Ollama, ...).
+   * An attached image is sent as an image_url content part.
    */
-  private async streamFromGroq(
-    questionText: string,
-    sessionType: SessionType,
-    lengthMode: AnswerLengthMode,
-    contextSummary: string,
-    recentTranscripts: { speaker: string; text: string }[],
-    modifier: string | undefined,
+  private async streamChatCompletions(
+    endpoint: { label: string; url: string; apiKey: string | undefined; model: string },
+    systemPrompt: string,
+    input: ChatInput,
+    options: { temperature: number; maxTokens: number },
     emit: (token: string) => void,
     signal: AbortSignal
   ): Promise<void> {
-    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    const userContent = input.image
+      ? [
+          { type: 'text', text: input.text },
+          { type: 'image_url', image_url: { url: `data:${input.image.mimeType};base64,${input.image.base64}` } },
+        ]
+      : input.text;
+
+    const response = await fetch(endpoint.url, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${this.groqApiKey}`,
+        'Authorization': `Bearer ${endpoint.apiKey || 'not-needed'}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: this.groqModel,
+        model: endpoint.model,
         messages: [
-          { role: 'system', content: this.buildSystemPrompt(sessionType, lengthMode, contextSummary, modifier) },
-          { role: 'user', content: this.buildUserPrompt(questionText, recentTranscripts) },
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userContent },
         ],
-        temperature: 0.65,
-        max_tokens: lengthMode === 'quick' ? 300 : lengthMode === 'detailed' ? 850 : 550,
+        temperature: options.temperature,
+        max_tokens: options.maxTokens,
         stream: true,
       }),
       signal,
     });
 
     if (!response.ok) {
-      throw new Error(`Groq API HTTP ${response.status}: ${await response.text()}`);
-    }
-
-    const think = new ThinkFilter();
-    await this.readSse(response, data => {
-      if (data === '[DONE]') return;
-      try {
-        const delta = JSON.parse(data).choices?.[0]?.delta?.content;
-        if (delta) emit(think.push(delta));
-      } catch {
-        // ignore malformed lines
-      }
-    });
-    emit(think.flush());
-  }
-
-  /**
-   * Stream from OpenAI or any OpenAI-compatible API (Ollama, DeepSeek, OpenRouter, Together AI).
-   */
-  private async streamFromOpenAI(
-    questionText: string,
-    sessionType: SessionType,
-    lengthMode: AnswerLengthMode,
-    contextSummary: string,
-    recentTranscripts: { speaker: string; text: string }[],
-    modifier: string | undefined,
-    emit: (token: string) => void,
-    signal: AbortSignal
-  ): Promise<void> {
-    const url = `${this.openaiBaseUrl}/chat/completions`;
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${this.openaiApiKey || 'not-needed'}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: this.openaiModel,
-        messages: [
-          { role: 'system', content: this.buildSystemPrompt(sessionType, lengthMode, contextSummary, modifier) },
-          { role: 'user', content: this.buildUserPrompt(questionText, recentTranscripts) },
-        ],
-        temperature: 0.65,
-        max_tokens: lengthMode === 'quick' ? 300 : lengthMode === 'detailed' ? 850 : 550,
-        stream: true,
-      }),
-      signal,
-    });
-
-    if (!response.ok) {
-      throw new Error(`OpenAI-compatible API HTTP ${response.status}: ${await response.text()}`);
+      throw new Error(`${endpoint.label} HTTP ${response.status}: ${await response.text()}`);
     }
 
     const think = new ThinkFilter();

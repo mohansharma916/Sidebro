@@ -25,6 +25,9 @@ export type QuestionCategory =
   | 'General'
   | 'manual';
 
+/** Where a question came from; each source streams its own answer independently. */
+export type AnswerSource = 'voice' | 'clipboard' | 'screen';
+
 export type DeviceType = 'CAPTURE' | 'WEB' | 'MOBILE' | 'TABLET';
 
 export type DeviceRole = 'PRIMARY_CAPTURE' | 'SECOND_SCREEN';
@@ -90,6 +93,7 @@ export interface DetectedQuestion {
   confidence: number;
   timestamp: number;
   contextSummary?: string;
+  source?: AnswerSource;
 }
 
 export interface GeneratedAnswer {
@@ -109,6 +113,7 @@ export interface GeneratedAnswer {
   firstTokenLatencyMs?: number;
   totalLatencyMs?: number;
   timestamp: number;
+  source?: AnswerSource;
 }
 
 export interface SessionNote {
