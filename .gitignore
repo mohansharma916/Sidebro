@@ -49,3 +49,6 @@ Thumbs.db
 tmp/
 temp/
 scratch/
+
+# Downloaded system design library (fetch with doc/system-design/download-library.sh)
+doc/system-design/library/
